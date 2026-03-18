@@ -78,6 +78,7 @@ public:
                                          torch::Tensor pin_id2node_id,
                                          int num_movable_nodes);
     int getNumOvflNets() { return numOvflNets; }
+    std::vector<std::vector<int>> getRawRoutes();
 
 private:
     GPUMazeRouter gpuMR;

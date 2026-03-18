@@ -170,4 +170,8 @@ std::vector<int> RouteForce::getLayerPitch() { return grdb.layerPitch; }
 
 std::vector<int> RouteForce::getLayerWidth() { return grdb.layerWidth; }
 
+std::vector<std::vector<int>> RouteForce::getRawRoutes() { return router.getRawRoutes(); }
+
+gr::GRDatabase& RouteForce::getGRDatabase() { return grdb; }
+
 }  // namespace gr

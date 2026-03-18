@@ -962,4 +962,34 @@ void GPURouter::setToNets(std::vector<GrNet> &nets) {
     delete[] routesCPU;
 }
 
+std::vector<std::vector<int>> GPURouter::getRawRoutes() {
+    std::vector<std::vector<int>> rawRoutes;
+    if (routes == nullptr || routesOffsetCPU == nullptr || NET_NUM <= 0) {
+        return rawRoutes;
+    }
+
+    int totalRouteInts = routesOffsetCPU[NET_NUM];
+    if (totalRouteInts <= 0) {
+        return rawRoutes;
+    }
+
+    int* routesCPU = new int[totalRouteInts];
+    cudaMemcpy(routesCPU, routes, sizeof(int) * totalRouteInts, cudaMemcpyDeviceToHost);
+
+    rawRoutes.reserve(NET_NUM);
+    for (int netId = 0; netId < NET_NUM; netId++) {
+        int begin = routesOffsetCPU[netId];
+        int end = routesOffsetCPU[netId + 1];
+        int usedLen = routesCPU[begin];
+        int copyLen = 1;
+        if (usedLen > 0) {
+            copyLen = std::min(end - begin, usedLen);
+        }
+        rawRoutes.emplace_back(routesCPU + begin, routesCPU + begin + copyLen);
+    }
+
+    delete[] routesCPU;
+    return rawRoutes;
+}
+
 }  // namespace gr

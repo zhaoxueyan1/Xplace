@@ -61,6 +61,8 @@ public:
     std::tuple<int, int> getGcellStep();
     std::vector<int> getLayerPitch();
     std::vector<int> getLayerWidth();
+    std::vector<std::vector<int>> getRawRoutes();
+    gr::GRDatabase& getGRDatabase();
 
 private:
     gr::GRDatabase& grdb;
