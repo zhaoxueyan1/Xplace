@@ -5,6 +5,35 @@
 
 namespace gr {
 
+namespace {
+
+torch::Tensor buildGridGraphMapTensor(
+    const std::vector<float>& values,
+    int layer_count,
+    int n_max_grid,
+    int x_size,
+    int y_size,
+    int direction) {
+    auto map = torch::zeros({layer_count, x_size, y_size}, torch::dtype(torch::kFloat32));
+    auto accessor = map.accessor<float, 3>();
+    for (int layer = 0; layer < layer_count; ++layer) {
+        for (int x = 0; x < x_size; ++x) {
+            for (int y = 0; y < y_size; ++y) {
+                int mapped_x = x;
+                int mapped_y = y;
+                if (!(layer & 1) ^ direction) {
+                    std::swap(mapped_x, mapped_y);
+                }
+                int idx = layer * n_max_grid * n_max_grid + mapped_x * n_max_grid + mapped_y;
+                accessor[layer][x][y] = values[idx];
+            }
+        }
+    }
+    return map;
+}
+
+}  // namespace
+
 RouteForce::RouteForce(std::shared_ptr<gr::GRDatabase> grdb_) : grdb(*grdb_) {}
 
 void RouteForce::run_ggr() {
@@ -72,6 +101,28 @@ void RouteForce::run_ggr() {
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> RouteForce::getDemandMap() { return router.getDemandMap(); }
 
 torch::Tensor RouteForce::getCapacityMap() { return router.getCapacityMap(); }
+
+torch::Tensor RouteForce::getRawWireDemandMap() { return router.getRawWireDemandMap(); }
+
+torch::Tensor RouteForce::getFixUsageMap() {
+    return buildGridGraphMapTensor(
+        grdb.fixTmpUsage,
+        grdb.nLayers,
+        grdb.nMaxGrid,
+        grdb.xSize,
+        grdb.ySize,
+        grdb.m1direction);
+}
+
+torch::Tensor RouteForce::getMovUsageMap() {
+    return buildGridGraphMapTensor(
+        grdb.movTmpUsage,
+        grdb.nLayers,
+        grdb.nMaxGrid,
+        grdb.xSize,
+        grdb.ySize,
+        grdb.m1direction);
+}
 
 torch::Tensor RouteForce::calcRouteGrad(torch::Tensor mask_map,
                                         torch::Tensor wire_dmd_map_2d,

@@ -74,6 +74,19 @@ __global__ void getCapTensor(
     }
 }
 
+__global__ void getRawWireDmdTensor(
+    torch::PackedTensorAccessor32<float, 3, torch::RestrictPtrTraits> wireMap,
+    int *wires, int N, int LAYER, int xSize, int ySize, int DIRECTION) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if(idx < LAYER * N * N && idx % N + 1 < N) {
+        int layer = idx / N / N, x = idx / N % N, y = idx % N;
+        if (!(layer & 1) ^ DIRECTION) cudaSwapInt(x, y);
+        if (layer < LAYER && x < xSize && y < ySize) {
+            wireMap[layer][x][y] = wires[idx];
+        }
+    }
+}
+
 __global__ void compGcellRouteForce(
     torch::PackedTensorAccessor32<float, 2, torch::RestrictPtrTraits> gbpin_grad,
     torch::PackedTensorAccessor32<float, 2, torch::RestrictPtrTraits> mask_map,
@@ -407,6 +420,17 @@ torch::Tensor GPURouter::getCapacityMap() {
         capMap.packed_accessor32<float, 3, torch::RestrictPtrTraits>(),
         capacity, wires, vias, fixed, N, LAYER, xSize, ySize, DIRECTION);
     return capMap;
+}
+
+torch::Tensor GPURouter::getRawWireDemandMap() {
+    int xSize = X;
+    int ySize = Y;
+    torch::Tensor wireMap = torch::zeros({LAYER, xSize, ySize},
+                        torch::dtype(torch::kFloat32).device(torch::Device(torch::kCUDA, DEVICE_ID)));
+    getRawWireDmdTensor<<<BLOCK_NUMBER(LAYER * N * N), BLOCK_SIZE>>>(
+        wireMap.packed_accessor32<float, 3, torch::RestrictPtrTraits>(),
+        wires, N, LAYER, xSize, ySize, DIRECTION);
+    return wireMap;
 }
 
 torch::Tensor GPURouter::calcRouteGrad(torch::Tensor mask_map,

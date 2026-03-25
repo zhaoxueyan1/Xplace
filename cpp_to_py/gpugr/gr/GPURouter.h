@@ -37,6 +37,7 @@ public:
 public:
     std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> getDemandMap();
     torch::Tensor getCapacityMap();
+    torch::Tensor getRawWireDemandMap();
     torch::Tensor calcRouteGrad(torch::Tensor mask_map,
                                 torch::Tensor wire_dmd_map_2d,
                                 torch::Tensor via_dmd_map_2d,
