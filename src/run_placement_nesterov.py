@@ -1,4 +1,5 @@
 from utils import *
+from utils.logger import save_effective_runtime_params
 from src import *
 from functools import partial
 
@@ -442,6 +443,31 @@ def run_placement_main_nesterov(args, logger):
     data.init_filler()
 
     ps = ParamScheduler(data, args, logger)
+    runtime_params_path = save_effective_runtime_params(
+        args,
+        extra_sections={
+            "design_params": params,
+            "effective_design_state": {
+                "num_bin_x": data.num_bin_x,
+                "num_bin_y": data.num_bin_y,
+                "unit_len": data.unit_len,
+                "target_density": args.target_density,
+                "use_filler": args.use_filler,
+                "num_fillers": data.num_fillers,
+                "num_movable_macros": data.num_movable_macros,
+                "include_macros": getattr(args, "include_macros", False),
+                "mixed_size": args.mixed_size,
+            },
+            "scheduler_initial_state": {
+                "enable_route": ps.enable_route,
+                "use_route_force": ps.use_route_force,
+                "use_cell_inflate": ps.use_cell_inflate,
+                "enable_mixed_size": ps.enable_mixed_size,
+                "zero_macro_grad": ps.zero_macro_grad,
+            },
+        },
+    )
+    logger.info("effective runtime params file: %s" % runtime_params_path)
 
     gputimer = None
     if args.timing_opt:        
@@ -469,11 +495,13 @@ def run_placement_main_nesterov(args, logger):
     iteration += 1
 
     route_metrics = None
-    if ps.enable_route and args.final_route_eval:
+    # Allow standalone final GR evaluation even when routability optimization is disabled.
+    if args.final_route_eval:
         logger.info("Final routing evalution by GGR...")
         route_metrics = run_gr_and_fft(
             args, logger, data, rawdb, gpdb, ps, 
             report_gr_metrics_only=True,
+            run_tag="final_route_eval",
             skip_m1_route=True, given_gr_params={
                 "rrrIters": 1,
                 "route_guide": os.path.join(args.result_dir, args.exp_id, args.output_dir, "%s_%s.guide" %(args.output_prefix, args.design_name)),

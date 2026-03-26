@@ -9,6 +9,7 @@ import seaborn as sns
 import os
 import copy
 import torchvision.transforms
+from utils.logger import append_gr_run_params
 
 
 class RouteCache:
@@ -258,7 +259,7 @@ def run_gr_and_fft_main(
     return output
 
 
-def run_gr_and_fft(args, logger, data, rawdb, gpdb, ps, grdb=None, skip_m1_route=True, run_fft=False, visualize=False, report_gr_metrics_only=False, given_gr_params={}):
+def run_gr_and_fft(args, logger, data, rawdb, gpdb, ps, grdb=None, skip_m1_route=True, run_fft=False, visualize=False, report_gr_metrics_only=False, given_gr_params={}, run_tag="route_force"):
     route_size = min(512, args.num_bin_y)
     iteration = ps.iter - 1  # ps.iter is increased before running GR optimization
     die_ratio = (data.__ori_die_hx__ - data.__ori_die_lx__) / (data.__ori_die_hy__ - data.__ori_die_ly__)
@@ -271,6 +272,22 @@ def run_gr_and_fft(args, logger, data, rawdb, gpdb, ps, grdb=None, skip_m1_route
     )
     gr_params = {"device_id": args.gpu, "route_xSize": route_xSize, "route_ySize": route_ySize}
     gr_params.update(given_gr_params)
+    append_gr_run_params(
+        args,
+        run_tag=run_tag,
+        gr_params=gr_params,
+        extra={
+            "iteration": iteration,
+            "skip_m1_route": skip_m1_route,
+            "run_fft": run_fft,
+            "visualize": visualize,
+            "report_gr_metrics_only": report_gr_metrics_only,
+            "placement_num_bin_x": data.num_bin_x,
+            "placement_num_bin_y": data.num_bin_y,
+            "route_size": route_size,
+            "die_ratio": die_ratio,
+        },
+    )
     gpugr.load_gr_params(gr_params)
 
     # 1.2) do GR
