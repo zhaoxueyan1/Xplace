@@ -1876,8 +1876,14 @@ int readDefNet(defrCallbackType_e c, defiNet* dnet, defiUserData ud) {
             IOPin* iopin = db->getIOPin(iopinname);
             if (!iopin) {
                 logger.warning("IO pin is not defined: %s", iopinname.c_str());
+                continue;
             }
             pin = iopin->pin;
+            if (!pin) {
+                string netName(dnet->name());
+                logger.warning("IO pin has no backing pin: %s %s", netName.c_str(), iopinname.c_str());
+                continue;
+            }
             if (pin->is_connected) {
                 string netName(dnet->name());
                 logger.warning("IO Pin is re-connected: %s %s", netName.c_str(), iopinname.c_str());
@@ -1890,11 +1896,13 @@ int readDefNet(defrCallbackType_e c, defiNet* dnet, defiUserData ud) {
             Cell* cell = db->getCell(cellname);
             if (!cell) {
                 logger.warning("Cell is not defined: %s", cellname.c_str());
+                continue;
             }
             pin = cell->pin(pinname);
             if (!pin) {
                 string netName(dnet->name());
                 logger.warning("Pin is not defined: %s %s %s", netName.c_str(), cellname.c_str(), pinname.c_str());
+                continue;
             }
             if (pin->is_connected) {
                 string netName(dnet->name());
