@@ -98,6 +98,7 @@ private:
     int *gbpinRoutes = nullptr, *gbpin2netId = nullptr, *plPinId2gbPinId = nullptr;
     float *capacity, *wireDist, *fixedLength, *fixed;
     int *wires, *vias, *prev;
+    int64_t *prDist = nullptr;
     int *isOverflowWire, *isOverflowVia, *isOverflowNet = nullptr;
     int *boundaries, *isLocked;
     int *wiresCPU, *viasCPU;

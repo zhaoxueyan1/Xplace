@@ -48,6 +48,7 @@ def get_option():
     parser.add_argument('--congest_weight', type=float, default=0, help='the weight of congested force')
     parser.add_argument('--pseudo_weight', type=float, default=0, help='the weight of pseudo net')
     parser.add_argument('--visualize_cgmap', type=str2bool, default=False, help='visualize congestion map')
+    parser.add_argument('--save_ggr_artifacts', type=str2bool, default=False, help='save Xplace GGR npz/json/png artifacts for each GR call')
 
     # timing opt params
     parser.add_argument('--timing_opt', type=str2bool, default=False, help='perform timing optimization') 

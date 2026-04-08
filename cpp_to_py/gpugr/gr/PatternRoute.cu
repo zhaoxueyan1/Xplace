@@ -8,7 +8,9 @@ namespace gr {
 __managed__ int debug;
 
 #define INF 1000000000
+constexpr int64_t PR_INF = (1LL << 60);
 __global__ void initMap(int *map) { map[blockIdx.x * blockDim.x + threadIdx.x] = INF; }
+__global__ void initMap64(int64_t *map) { map[blockIdx.x * blockDim.x + threadIdx.x] = PR_INF; }
 template <typename T>
 __device__ void inline cudaSwap(T &a, T &b) {
     T c(a);
@@ -17,6 +19,26 @@ __device__ void inline cudaSwap(T &a, T &b) {
 }
 
 __device__ void viaSweep(int *map, int *prev, int *viaCost, int x, int y, int LAYER, int N, int DIRECTION) {
+    map += 4 * LAYER * N * N;
+    prev += 4 * LAYER * N * N;
+    for (int i = 1; i < LAYER; i++) {
+        int cur = i * N * N + (((i & 1) ^ DIRECTION) ? x * N + y : y * N + x);
+        prev[cur + LAYER * N * N] = cur;
+    }
+    for (int i = 2; i < LAYER; i++) {
+        int cur = i * N * N + (((i & 1) ^ DIRECTION) ? x * N + y : y * N + x);
+        int last = (i - 1) * N * N + (((i & 1) ^ DIRECTION) ? y * N + x : x * N + y);
+        if (map[cur] > map[last] + viaCost[last])
+            map[cur] = map[last] + viaCost[last], prev[cur] = prev[last], prev[cur + LAYER * N * N] = last;
+    }
+    for (int i = LAYER - 2; i >= 1; i--) {
+        int cur = i * N * N + (((i & 1) ^ DIRECTION) ? x * N + y : y * N + x);
+        int last = (i + 1) * N * N + (((i & 1) ^ DIRECTION) ? y * N + x : x * N + y);
+        if (map[cur] > map[last] + viaCost[cur])
+            map[cur] = map[last] + viaCost[cur], prev[cur] = prev[last], prev[cur + LAYER * N * N] = last;
+    }
+}
+__device__ void viaSweep64(int64_t *map, int *prev, int *viaCost, int x, int y, int LAYER, int N, int DIRECTION) {
     map += 4 * LAYER * N * N;
     prev += 4 * LAYER * N * N;
     for (int i = 1; i < LAYER; i++) {
@@ -588,7 +610,7 @@ __global__ void cudaPatternRoute(int *map,
         }
     // printf("\n");
 }
-__global__ void cudaPatternRouteParallel(int *map,
+__global__ void cudaPatternRouteParallel(int64_t *map,
                                          int *points,
                                          int64_t *wireCostSum,
                                          int *viaCost,
@@ -620,11 +642,11 @@ __global__ void cudaPatternRouteParallel(int *map,
                     for (int a = min(fromx, tox) + threadIdx.x; a <= max(fromx, tox); a += blockDim.x) {
                         for (int i = 1; i < LAYER; i++) {
                             if ((i & 1) ^ DIRECTION) {
-                                map[4 * LAYER * N * N + i * N * N + a * N + toy] = INF;
-                                map[4 * LAYER * N * N + i * N * N + a * N + fromy] = INF;
+                                map[4 * LAYER * N * N + i * N * N + a * N + toy] = PR_INF;
+                                map[4 * LAYER * N * N + i * N * N + a * N + fromy] = PR_INF;
                             } else {
-                                map[4 * LAYER * N * N + i * N * N + toy * N + a] = INF;
-                                map[4 * LAYER * N * N + i * N * N + fromy * N + a] = INF;
+                                map[4 * LAYER * N * N + i * N * N + toy * N + a] = PR_INF;
+                                map[4 * LAYER * N * N + i * N * N + fromy * N + a] = PR_INF;
                             }
                         }
                     }
@@ -632,11 +654,11 @@ __global__ void cudaPatternRouteParallel(int *map,
                     for (int b = min(fromy, toy) + threadIdx.x; b <= max(fromy, toy); b += blockDim.x) {
                         for (int i = 1; i < LAYER; i++) {
                             if ((i & 1) ^ DIRECTION) {
-                                map[4 * LAYER * N * N + i * N * N + tox * N + b] = INF;
-                                map[4 * LAYER * N * N + i * N * N + fromx * N + b] = INF;
+                                map[4 * LAYER * N * N + i * N * N + tox * N + b] = PR_INF;
+                                map[4 * LAYER * N * N + i * N * N + fromx * N + b] = PR_INF;
                             } else {
-                                map[4 * LAYER * N * N + i * N * N + b * N + tox] = INF;
-                                map[4 * LAYER * N * N + i * N * N + b * N + fromx] = INF;
+                                map[4 * LAYER * N * N + i * N * N + b * N + tox] = PR_INF;
+                                map[4 * LAYER * N * N + i * N * N + b * N + fromx] = PR_INF;
                             }
                         }
                     }
@@ -647,8 +669,8 @@ __global__ void cudaPatternRouteParallel(int *map,
                             for (int b = min(fromy, toy) + threadIdx.x; b <= max(fromy, toy); b += blockDim.x) {
                                 if (b != fromy) {
                                     int cur = i * N * N + fromx * N + b;
-                                    int cost = last < cur ? wireCostSum[last] - wireCostSum[cur]
-                                                          : wireCostSum[cur] - wireCostSum[last];
+                                    int64_t cost = last < cur ? wireCostSum[last] - wireCostSum[cur]
+                                                              : wireCostSum[cur] - wireCostSum[last];
                                     map[4 * LAYER * N * N + cur] = map[last] + cost;
                                     prev[4 * LAYER * N * N + cur] = last;
                                 }
@@ -658,8 +680,8 @@ __global__ void cudaPatternRouteParallel(int *map,
                             for (int b = min(fromx, tox) + threadIdx.x; b <= max(fromx, tox); b += blockDim.x) {
                                 if (b != fromx) {
                                     int cur = i * N * N + fromy * N + b;
-                                    int cost = last < cur ? wireCostSum[last] - wireCostSum[cur]
-                                                          : wireCostSum[cur] - wireCostSum[last];
+                                    int64_t cost = last < cur ? wireCostSum[last] - wireCostSum[cur]
+                                                              : wireCostSum[cur] - wireCostSum[last];
                                     map[4 * LAYER * N * N + cur] = map[last] + cost;
                                     prev[4 * LAYER * N * N + cur] = last;
                                 }
@@ -669,17 +691,17 @@ __global__ void cudaPatternRouteParallel(int *map,
                     }
                     __syncthreads();
                     for (int b = min(fromy, toy) + threadIdx.x; b <= max(fromy, toy); b += blockDim.x)
-                        if (b != fromy) viaSweep(map, prev, viaCost, fromx, b, LAYER, N, DIRECTION);
+                        if (b != fromy) viaSweep64(map, prev, viaCost, fromx, b, LAYER, N, DIRECTION);
                     __syncthreads();
                     for (int b = min(fromx, tox) + threadIdx.x; b <= max(fromx, tox); b += blockDim.x)
-                        if (b != fromx) viaSweep(map, prev, viaCost, b, fromy, LAYER, N, DIRECTION);
+                        if (b != fromx) viaSweep64(map, prev, viaCost, b, fromy, LAYER, N, DIRECTION);
                     __syncthreads();
                     for (int i = 1; i < LAYER; i++) {
                         if ((i & 1) ^ DIRECTION) {
                             for (int b = min(fromx, tox) + threadIdx.x; b <= max(fromx, tox); b += blockDim.x) {
                                 int last = i * N * N + b * N + fromy, cur = i * N * N + b * N + toy;
-                                int cost = last < cur ? wireCostSum[last] - wireCostSum[cur]
-                                                      : wireCostSum[cur] - wireCostSum[last];
+                                int64_t cost = last < cur ? wireCostSum[last] - wireCostSum[cur]
+                                                          : wireCostSum[cur] - wireCostSum[last];
                                 if (map[4 * LAYER * N * N + last] + cost < map[4 * LAYER * N * N + cur]) {
                                     map[4 * LAYER * N * N + cur] = map[4 * LAYER * N * N + last] + cost;
                                     prev[4 * LAYER * N * N + cur] = prev[4 * LAYER * N * N + last];
@@ -688,8 +710,8 @@ __global__ void cudaPatternRouteParallel(int *map,
                         } else {
                             for (int b = min(fromy, toy) + threadIdx.x; b <= max(fromy, toy); b += blockDim.x) {
                                 int last = i * N * N + b * N + fromx, cur = i * N * N + b * N + tox;
-                                int cost = last < cur ? wireCostSum[last] - wireCostSum[cur]
-                                                      : wireCostSum[cur] - wireCostSum[last];
+                                int64_t cost = last < cur ? wireCostSum[last] - wireCostSum[cur]
+                                                          : wireCostSum[cur] - wireCostSum[last];
                                 if (map[4 * LAYER * N * N + last] + cost < map[4 * LAYER * N * N + cur]) {
                                     map[4 * LAYER * N * N + cur] = map[4 * LAYER * N * N + last] + cost;
                                     prev[4 * LAYER * N * N + cur] = prev[4 * LAYER * N * N + last];
@@ -700,10 +722,10 @@ __global__ void cudaPatternRouteParallel(int *map,
                     }
                     __syncthreads();
                     for (int b = min(fromy, toy) + threadIdx.x; b <= max(fromy, toy); b += blockDim.x)
-                        if (b != toy) viaSweep(map, prev, viaCost, tox, b, LAYER, N, DIRECTION);
+                        if (b != toy) viaSweep64(map, prev, viaCost, tox, b, LAYER, N, DIRECTION);
                     __syncthreads();
                     for (int b = min(fromx, tox) + threadIdx.x; b <= max(fromx, tox); b += blockDim.x)
-                        if (b != tox) viaSweep(map, prev, viaCost, b, toy, LAYER, N, DIRECTION);
+                        if (b != tox) viaSweep64(map, prev, viaCost, b, toy, LAYER, N, DIRECTION);
                     __syncthreads();
                     for (int i = 1 + threadIdx.x; i < LAYER; i += blockDim.x) {
                         if ((i & 1) ^ DIRECTION) {
@@ -711,8 +733,8 @@ __global__ void cudaPatternRouteParallel(int *map,
                             for (int b = min(fromy, toy); b <= max(fromy, toy); b++) {
                                 if (b != toy) {
                                     int last = i * N * N + tox * N + b;
-                                    int cost = last < cur ? wireCostSum[last] - wireCostSum[cur]
-                                                          : wireCostSum[cur] - wireCostSum[last];
+                                    int64_t cost = last < cur ? wireCostSum[last] - wireCostSum[cur]
+                                                              : wireCostSum[cur] - wireCostSum[last];
                                     if (map[4 * LAYER * N * N + last] + cost < map[cur + j * LAYER * N * N]) {
                                         map[cur + j * LAYER * N * N] = map[4 * LAYER * N * N + last] + cost;
                                         prev[cur + j * LAYER * N * N] = prev[4 * LAYER * N * N + last];
@@ -725,8 +747,8 @@ __global__ void cudaPatternRouteParallel(int *map,
                             for (int b = min(fromx, tox); b <= max(fromx, tox); b++) {
                                 if (b != tox) {
                                     int last = i * N * N + toy * N + b;
-                                    int cost = last < cur ? wireCostSum[last] - wireCostSum[cur]
-                                                          : wireCostSum[cur] - wireCostSum[last];
+                                    int64_t cost = last < cur ? wireCostSum[last] - wireCostSum[cur]
+                                                              : wireCostSum[cur] - wireCostSum[last];
                                     if (map[4 * LAYER * N * N + last] + cost < map[cur + j * LAYER * N * N]) {
                                         map[cur + j * LAYER * N * N] = map[4 * LAYER * N * N + last] + cost;
                                         prev[cur + j * LAYER * N * N] = prev[4 * LAYER * N * N + last];
@@ -741,12 +763,12 @@ __global__ void cudaPatternRouteParallel(int *map,
                     for (int i = 1 + threadIdx.x; i < LAYER; i += blockDim.x) {
                         if ((i & 1) ^ DIRECTION) {
                             int last = i * N * N + fromx * N + fromy, cur = i * N * N + tox * N + toy;
-                            int cost = last < cur ? wireCostSum[last] - wireCostSum[cur]
-                                                  : wireCostSum[cur] - wireCostSum[last];
+                            int64_t cost = last < cur ? wireCostSum[last] - wireCostSum[cur]
+                                                      : wireCostSum[cur] - wireCostSum[last];
                             if (map[cur + j * LAYER * N * N] > map[last] + cost)
                                 map[cur + j * LAYER * N * N] = map[last] + cost, prev[cur + j * LAYER * N * N] = last;
                         } else {
-                            map[i * N * N + toy * N + tox + j * LAYER * N * N] = INF;
+                            map[i * N * N + toy * N + tox + j * LAYER * N * N] = PR_INF;
                         }
                     }
                     __syncthreads();
@@ -754,13 +776,13 @@ __global__ void cudaPatternRouteParallel(int *map,
                     for (int i = 1 + threadIdx.x; i < LAYER; i += blockDim.x) {
                         if (!(i & 1) ^ DIRECTION) {
                             int last = i * N * N + fromy * N + fromx, cur = i * N * N + toy * N + tox;
-                            int cost = last < cur ? wireCostSum[last] - wireCostSum[cur]
-                                                  : wireCostSum[cur] - wireCostSum[last];
+                            int64_t cost = last < cur ? wireCostSum[last] - wireCostSum[cur]
+                                                      : wireCostSum[cur] - wireCostSum[last];
                             if (map[cur + j * LAYER * N * N] > map[last] + cost) {
                                 map[cur + j * LAYER * N * N] = map[last] + cost, prev[cur + j * LAYER * N * N] = last;
                             }
                         } else {
-                            map[i * N * N + tox * N + toy + j * LAYER * N * N] = INF;
+                            map[i * N * N + tox * N + toy + j * LAYER * N * N] = PR_INF;
                         }
                     }
                     __syncthreads();
@@ -808,7 +830,7 @@ __global__ void cudaPatternRouteParallel(int *map,
     }
     __syncthreads();
     if (threadIdx.x == 0) {
-        int minTotalDist = INF;
+        int64_t minTotalDist = PR_INF;
         for (int i = 0; i < LAYER; i++) {
             int x = points[0] / N, y = points[0] % N;
             int idx = i * N * N + (((i & 1) ^ DIRECTION) ? x * N + y : y * N + x);
@@ -820,8 +842,12 @@ __global__ void cudaPatternRouteParallel(int *map,
                 // printf("layer = %d, idx=%d, bestpos = %d\n", i, idx, prev[idx] % LAYER);
             }
         }
-        if (minTotalDist == INF || minTotalDist < 0) {
-            printf("failed\n");
+        if (minTotalDist == PR_INF || minTotalDist < 0) {
+            printf("failed routeOffset=%d node_cnt=%d rootPos=%d minTotalDist=%lld\n",
+                   points[-2],
+                   node_cnt,
+                   points[0],
+                   (long long)minTotalDist);
             routes[0] = -1;
             // printf("routes[0] = %d\n", points[-2]);
             // return;
@@ -1171,7 +1197,7 @@ void patternRoute(int *points,
                   int batchSize,
                   int64_t *wireCostSum,
                   int *viaCost,
-                  int *map,
+                  int64_t *map,
                   int *prev,
                   int *wires,
                   int *vias,
@@ -1184,7 +1210,7 @@ void patternRoute(int *points,
                   int LAYER,
                   int DIRECTION) {
     // debug = 1;
-    initMap<<<6 * LAYER * N * 2, N / 2>>>(map);
+    initMap64<<<6 * LAYER * N * 2, N / 2>>>(map);
     // cudaDeviceSynchronize();
     // static int cnt = 11395;
     // cudaLshapePR<<<batchSize, 1>>> (map, points, wireCostSum, viaCost, prev, wires, vias, routes, LAYER, N,

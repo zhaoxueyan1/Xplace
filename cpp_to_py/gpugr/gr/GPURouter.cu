@@ -42,6 +42,7 @@ void GPURouter::initialize(int device_id, int layer, int x, int y, int N_, int c
     cudaMalloc(&viaCost, gridGraphSize * sizeof(dtype));
     cudaMalloc(&cost, gridGraphSize * sizeof(dtype));
     cudaMalloc(&costSum, gridGraphSize * sizeof(int64_t));
+    cudaMalloc(&prDist, 6 * gridGraphSize * sizeof(int64_t));
     cudaMalloc(&cell_resource, gridGraphSize * sizeof(float));
     cudaMalloc(&isOverflowWire, gridGraphSize * sizeof(int));
     cudaMalloc(&isOverflowVia, gridGraphSize * sizeof(int));
@@ -64,6 +65,7 @@ GPURouter::~GPURouter() {
     cudaFree(viaCost);
     cudaFree(cost);
     cudaFree(costSum);
+    cudaFree(prDist);
     cudaFree(cell_resource);
     cudaFree(isOverflowWire);
     cudaFree(isOverflowVia);
@@ -813,7 +815,7 @@ void GPURouter::route(std::vector<GrNet> &nets, int iter) {
             prpreparetime += clock() - t;
             t = clock();
             //cudaMemcpy(cuda_points, points, offset * sizeof(int), cudaMemcpyHostToDevice);
-            patternRoute(points, batchSize, costSum, viaCost, dist, prev, wires, vias, routes, gbpoints, gbpinRoutes, X, Y, N, LAYER, DIRECTION);
+            patternRoute(points, batchSize, costSum, viaCost, prDist, prev, wires, vias, routes, gbpoints, gbpinRoutes, X, Y, N, LAYER, DIRECTION);
             
             prtime += clock() - t;
         } else {
