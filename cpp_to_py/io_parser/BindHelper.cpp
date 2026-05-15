@@ -76,6 +76,7 @@ void bindGPDatabase(pybind11::module& m) {
         .def("snet_info_tensor", &gp::GPDatabase::getSnetInfoTensor, py::return_value_policy::move)
         .def("apply_node_cpos", &gp::GPDatabase::applyNodeCPos)
         .def("apply_node_lpos", &gp::GPDatabase::applyNodeLPos)
+        .def("apply_node_lpos_keep_orient", &gp::GPDatabase::applyNodeLPosKeepOrient)
         .def("write_placement", &gp::GPDatabase::writePlacement)
         .def("get_io_nets", &gp::GPDatabase::getIONets)
         ;

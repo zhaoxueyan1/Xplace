@@ -898,6 +898,19 @@ void GPDatabase::applyNodeLPos(torch::Tensor node_lpos) {
     }
 }
 
+void GPDatabase::applyNodeLPosKeepOrient(torch::Tensor node_lpos) {
+    const float* node_lpos_ptr = node_lpos.data_ptr<float>();
+    for (auto& node : nodes) {
+        if (node.getNodeType() != "Mov" && node.getNodeType() != "FloatMov") {
+            continue;
+        }
+        node.setLx(node_lpos_ptr[node.getId() * 2 + 0]);
+        node.setLy(node_lpos_ptr[node.getId() * 2 + 1]);
+        auto cell = database.cells[node.getOriDBId()];
+        cell->place(std::lround(node.getLx()), std::lround(node.getLy()));
+    }
+}
+
 void GPDatabase::writePlacement(const std::string& given_prefix) { database.save(given_prefix); }
 
 }  // namespace gp

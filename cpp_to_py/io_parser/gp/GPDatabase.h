@@ -257,6 +257,7 @@ public:
     void applyOneNodeOrient(int node_id);
     void applyNodeCPos(torch::Tensor node_cpos);
     void applyNodeLPos(torch::Tensor node_lpos);
+    void applyNodeLPosKeepOrient(torch::Tensor node_lpos);
     std::vector<index_type> getIONets();
 
     // Write Placement
