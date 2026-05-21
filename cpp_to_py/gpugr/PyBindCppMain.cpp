@@ -13,7 +13,9 @@
 #include <algorithm>
 #include <cstdint>
 #include <map>
+#include <set>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace Xplace {
@@ -117,6 +119,22 @@ pybind11::array_t<T> vectorToNumpy(const std::vector<T>& values) {
     return result;
 }
 
+std::vector<int> intArrayToVector(pybind11::handle value, const std::string& fieldName) {
+    auto array = pybind11::array_t<int64_t, pybind11::array::c_style | pybind11::array::forcecast>::ensure(value);
+    if (!array) {
+        throw std::runtime_error("GGR L-shape topology pack field '" + fieldName + "' must be an integer array");
+    }
+    if (array.ndim() != 1) {
+        throw std::runtime_error("GGR L-shape topology pack field '" + fieldName + "' must be 1D");
+    }
+    std::vector<int> values(static_cast<size_t>(array.shape(0)));
+    auto view = array.unchecked<1>();
+    for (pybind11::ssize_t i = 0; i < array.shape(0); ++i) {
+        values[static_cast<size_t>(i)] = static_cast<int>(view(i));
+    }
+    return values;
+}
+
 inline float gridCenter(int coordIdx, float origin, float step) {
     return origin + (static_cast<float>(coordIdx) + 0.5f) * step;
 }
@@ -126,6 +144,25 @@ int mappedNetId(const pybind11::dict& netNameToId, const std::string& netName, i
         return netNameToId[pybind11::str(netName)].cast<int>();
     }
     return fallbackNetId;
+}
+
+int mappedLShapeNetId(const pybind11::dict& netNameToId, const std::string& netName) {
+    if (!netName.empty() && netNameToId.contains(pybind11::str(netName))) {
+        return netNameToId[pybind11::str(netName)].cast<int>();
+    }
+    return -1;
+}
+
+int mappedPinId(const pybind11::dict& pinNameToId, const gp::GPPin& pin) {
+    const std::string pinName = pin.getName();
+    if (!pinName.empty() && pinNameToId.contains(pybind11::str(pinName))) {
+        return pinNameToId[pybind11::str(pinName)].cast<int>();
+    }
+    const std::string macroName = pin.getMacroName();
+    if (!macroName.empty() && pinNameToId.contains(pybind11::str(macroName))) {
+        return pinNameToId[pybind11::str(macroName)].cast<int>();
+    }
+    throw std::runtime_error("GGR L-shape topology pack cannot map gpdb pin '" + pinName + "'");
 }
 
 pybind11::dict decodeWireEntry(const gr::GRDatabase& grdb,
@@ -455,6 +492,383 @@ pybind11::dict buildSameNetTopologyPack(gr::RouteForce& routeforce,
     return result;
 }
 
+struct PinAccessGrid {
+    int x = 0;
+    int y = 0;
+};
+
+struct LShapeEdgeRecord {
+    int from = -1;
+    int to = -1;
+    int direction = 0;
+    int grid_from_x = 0;
+    int grid_from_y = 0;
+    int grid_to_x = 0;
+    int grid_to_y = 0;
+};
+
+int intervalOverlapLength(const std::vector<IntInterval>& intervals, int lo, int hi) {
+    if (hi < lo) {
+        std::swap(lo, hi);
+    }
+    int total = 0;
+    for (const IntInterval& interval : intervals) {
+        const int overlapLo = std::max(lo, interval.lo);
+        const int overlapHi = std::min(hi, interval.hi);
+        if (overlapHi > overlapLo) {
+            total += overlapHi - overlapLo;
+        }
+    }
+    return total;
+}
+
+int routeOverlapForLShape(const PackedTopologyRecord& routeRecord,
+                          int x1,
+                          int y1,
+                          int x2,
+                          int y2,
+                          bool horizontalFirst) {
+    int overlap = 0;
+    if (horizontalFirst) {
+        auto hIt = routeRecord.horizontal_by_row.find(y1);
+        if (hIt != routeRecord.horizontal_by_row.end()) {
+            overlap += intervalOverlapLength(hIt->second, x1, x2);
+        }
+        auto vIt = routeRecord.vertical_by_col.find(x2);
+        if (vIt != routeRecord.vertical_by_col.end()) {
+            overlap += intervalOverlapLength(vIt->second, y1, y2);
+        }
+    } else {
+        auto vIt = routeRecord.vertical_by_col.find(x1);
+        if (vIt != routeRecord.vertical_by_col.end()) {
+            overlap += intervalOverlapLength(vIt->second, y1, y2);
+        }
+        auto hIt = routeRecord.horizontal_by_row.find(y2);
+        if (hIt != routeRecord.horizontal_by_row.end()) {
+            overlap += intervalOverlapLength(hIt->second, x1, x2);
+        }
+    }
+    return overlap;
+}
+
+PackedTopologyRecord buildRouteRecordForNet(const gr::GRDatabase& grdb,
+                                            const std::vector<int>& rawRoute,
+                                            int targetNetId,
+                                            bool routeFailed,
+                                            int maxGap) {
+    PackedTopologyRecord record;
+    record.net_id = targetNetId;
+    record.route_failed = routeFailed;
+    if (!routeFailed && !rawRoute.empty()) {
+        int routeEnd = std::min(static_cast<int>(rawRoute.size()), rawRoute[0]);
+        for (int i = 1; i + 1 < routeEnd; i += 2) {
+            int p = rawRoute[i];
+            int span = rawRoute[i + 1];
+            if (span <= 0) {
+                continue;
+            }
+            ++record.raw_wire_count;
+            auto [l, x, y] = decodeRoutePoint(grdb, p);
+            bool vertical = ((l & 1) ^ grdb.m1direction);
+            int x1 = x;
+            int y1 = y;
+            int x2 = vertical ? x : x + span;
+            int y2 = vertical ? y + span : y;
+            if (!vertical && y1 == y2) {
+                record.horizontal_by_row[y1].push_back({std::min(x1, x2), std::max(x1, x2)});
+            } else if (vertical && x1 == x2) {
+                record.vertical_by_col[x1].push_back({std::min(y1, y2), std::max(y1, y2)});
+            } else {
+                ++record.invalid_wire_count;
+            }
+        }
+    }
+    finalizePackedTopologyRecord(record, maxGap);
+    return record;
+}
+
+int chooseLShapeDirection(const PackedTopologyRecord& routeRecord,
+                          const gp::point_type& pinPosA,
+                          const gp::point_type& pinPosB,
+                          const PinAccessGrid& accessA,
+                          const PinAccessGrid& accessB) {
+    constexpr double kCoordEps = 1e-3;
+    if (std::abs(pinPosA.first - pinPosB.first) <= kCoordEps ||
+        std::abs(pinPosA.second - pinPosB.second) <= kCoordEps) {
+        return 2;
+    }
+    if (accessA.y == accessB.y) {
+        return 0;
+    }
+    if (accessA.x == accessB.x) {
+        return 1;
+    }
+    const int hOverlap = routeOverlapForLShape(
+        routeRecord,
+        accessA.x,
+        accessA.y,
+        accessB.x,
+        accessB.y,
+        true);
+    const int vOverlap = routeOverlapForLShape(
+        routeRecord,
+        accessA.x,
+        accessA.y,
+        accessB.x,
+        accessB.y,
+        false);
+    return hOverlap >= vOverlap ? 0 : 1;
+}
+
+pybind11::dict buildLShapeTopologyPack(gr::RouteForce& routeforce,
+                                       pybind11::dict pinNameToId,
+                                       pybind11::dict netNameToId,
+                                       pybind11::handle flatNet2PinMapValue,
+                                       pybind11::handle flatNet2PinStartValue,
+                                       int numPins,
+                                       int numNets,
+                                       int routeNumBinsX,
+                                       int routeNumBinsY,
+                                       double xl,
+                                       double yl,
+                                       double routeBinSizeX,
+                                       double routeBinSizeY) {
+    if (numPins <= 0 || numNets < 0) {
+        throw std::runtime_error("GGR L-shape topology pack requires positive num_pins and non-negative num_nets");
+    }
+    std::vector<int> flatNet2PinMap = intArrayToVector(flatNet2PinMapValue, "flat_net2pin_map");
+    std::vector<int> flatNet2PinStart = intArrayToVector(flatNet2PinStartValue, "flat_net2pin_start_map");
+    if (static_cast<int>(flatNet2PinStart.size()) != numNets + 1) {
+        throw std::runtime_error("GGR L-shape topology pack flat_net2pin_start_map size must equal num_nets + 1");
+    }
+    if (flatNet2PinStart.empty() || flatNet2PinStart.front() != 0) {
+        throw std::runtime_error("GGR L-shape topology pack flat_net2pin_start_map must start at zero");
+    }
+    if (flatNet2PinStart.back() != static_cast<int>(flatNet2PinMap.size())) {
+        throw std::runtime_error("GGR L-shape topology pack flat_net2pin_start_map end must equal flat_net2pin_map size");
+    }
+    if (static_cast<int>(flatNet2PinMap.size()) != numPins) {
+        throw std::runtime_error("GGR L-shape topology pack requires flat_net2pin_map to cover every AutoDMP pin");
+    }
+    if (netNameToId.empty()) {
+        throw std::runtime_error("GGR L-shape topology pack requires a non-empty AutoDMP net name map");
+    }
+    std::vector<char> flatPinSeen(static_cast<size_t>(numPins), 0);
+    for (int netId = 0; netId < numNets; ++netId) {
+        if (flatNet2PinStart[netId] > flatNet2PinStart[netId + 1]) {
+            throw std::runtime_error("GGR L-shape topology pack flat_net2pin_start_map must be monotonic");
+        }
+        for (int idx = flatNet2PinStart[netId]; idx < flatNet2PinStart[netId + 1]; ++idx) {
+            const int pinId = flatNet2PinMap[static_cast<size_t>(idx)];
+            if (pinId < 0 || pinId >= numPins) {
+                throw std::runtime_error("GGR L-shape topology pack flat_net2pin_map contains pin id out of range");
+            }
+            if (flatPinSeen[static_cast<size_t>(pinId)]) {
+                throw std::runtime_error("GGR L-shape topology pack flat_net2pin_map contains duplicate pin id");
+            }
+            flatPinSeen[static_cast<size_t>(pinId)] = 1;
+        }
+    }
+
+    auto rawRoutes = routeforce.getRawRoutes();
+    auto& grdb = routeforce.getGRDatabase();
+    const auto& gpNets = grdb.gpdb.getNets();
+    const auto& gpPins = grdb.gpdb.getPins();
+
+    std::unordered_map<int, PinAccessGrid> accessByGpdbPin;
+    for (size_t netId = 0; netId < grdb.grNets.size(); ++netId) {
+        auto& grNet = grdb.grNets[netId];
+        const auto& grPins = grNet.getPins();
+        for (size_t grPinIdx = 0; grPinIdx < grPins.size(); ++grPinIdx) {
+            if (grPins[grPinIdx].empty()) {
+                continue;
+            }
+            auto [l, x, y] = decodeRoutePoint(grdb, grPins[grPinIdx].front());
+            if (grPinIdx >= grNet.pin2gpdbPinIds.size()) {
+                continue;
+            }
+            for (int gpdbPinId : grNet.pin2gpdbPinIds[grPinIdx]) {
+                accessByGpdbPin.emplace(gpdbPinId, PinAccessGrid{x, y});
+            }
+        }
+    }
+
+    std::vector<LShapeEdgeRecord> edgeRecords;
+    int routeFailedCount = 0;
+    int skippedUnmappedNetCount = 0;
+    int unmappedPinCount = 0;
+    const std::vector<int> emptyRawRoute;
+
+    for (size_t gpNetId = 0; gpNetId < gpNets.size(); ++gpNetId) {
+        const auto& gpNet = gpNets[gpNetId];
+        int rawdbNetId = gpNet.getOriDBId();
+        std::string netName = "";
+        if (0 <= rawdbNetId && rawdbNetId < static_cast<int>(grdb.rawdb.nets.size())) {
+            netName = grdb.rawdb.nets[rawdbNetId]->name;
+        } else {
+            netName = gpNet.getName();
+        }
+        const int targetNetId = mappedLShapeNetId(netNameToId, netName);
+        if (targetNetId < 0) {
+            ++skippedUnmappedNetCount;
+            continue;
+        }
+        if (targetNetId < 0 || targetNetId >= numNets) {
+            throw std::runtime_error("GGR L-shape topology pack net id out of range for net '" + netName + "'");
+        }
+
+        const std::vector<int>& rawRoute = gpNetId < rawRoutes.size() ? rawRoutes[gpNetId] : emptyRawRoute;
+        const bool routeFailed = rawRoute.empty() || rawRoute[0] < 0;
+        if (routeFailed) {
+            ++routeFailedCount;
+        }
+        PackedTopologyRecord routeRecord = buildRouteRecordForNet(
+            grdb,
+            rawRoute,
+            targetNetId,
+            routeFailed,
+            1);
+
+        std::vector<int> mappedGpdbPins;
+        std::vector<int> mappedGlobalPins;
+        std::set<int> seenGlobalPins;
+        for (int gpdbPinId : gpNet.pins()) {
+            if (gpdbPinId < 0 || gpdbPinId >= static_cast<int>(gpPins.size())) {
+                continue;
+            }
+            const int globalPinId = mappedPinId(pinNameToId, gpPins[gpdbPinId]);
+            if (globalPinId < 0 || globalPinId >= numPins) {
+                throw std::runtime_error("GGR L-shape topology pack pin id out of range");
+            }
+            if (seenGlobalPins.insert(globalPinId).second) {
+                mappedGpdbPins.push_back(gpdbPinId);
+                mappedGlobalPins.push_back(globalPinId);
+            }
+        }
+
+        if (mappedGlobalPins.size() < 2) {
+            continue;
+        }
+        for (size_t i = 1; i < mappedGlobalPins.size(); ++i) {
+            const int gpdbA = mappedGpdbPins[i - 1];
+            const int gpdbB = mappedGpdbPins[i];
+            auto accessItA = accessByGpdbPin.find(gpdbA);
+            auto accessItB = accessByGpdbPin.find(gpdbB);
+            if (accessItA == accessByGpdbPin.end() || accessItB == accessByGpdbPin.end()) {
+                ++unmappedPinCount;
+                throw std::runtime_error("GGR L-shape topology pack cannot map pin access gcell");
+            }
+            const int direction = chooseLShapeDirection(
+                routeRecord,
+                grdb.gpdb.getAbsolutePinPos(gpPins[gpdbA]),
+                grdb.gpdb.getAbsolutePinPos(gpPins[gpdbB]),
+                accessItA->second,
+                accessItB->second);
+            edgeRecords.push_back({
+                mappedGlobalPins[i - 1],
+                mappedGlobalPins[i],
+                direction,
+                accessItA->second.x,
+                accessItA->second.y,
+                accessItB->second.x,
+                accessItB->second.y,
+            });
+        }
+    }
+
+    std::vector<int32_t> pinRelateX(static_cast<size_t>(numPins));
+    std::vector<int32_t> pinRelateY(static_cast<size_t>(numPins));
+    std::vector<int32_t> pinFa(static_cast<size_t>(numPins), static_cast<int32_t>(-1));
+    for (int pinId = 0; pinId < numPins; ++pinId) {
+        pinRelateX[pinId] = pinId;
+        pinRelateY[pinId] = pinId;
+    }
+
+    std::vector<std::vector<LShapeEdgeRecord>> children(static_cast<size_t>(numPins));
+    for (const LShapeEdgeRecord& edge : edgeRecords) {
+        if (edge.from < 0 || edge.from >= numPins || edge.to < 0 || edge.to >= numPins) {
+            throw std::runtime_error("GGR L-shape topology pack generated edge index out of range");
+        }
+        children[edge.from].push_back(edge);
+        if (pinFa[edge.to] < 0) {
+            pinFa[edge.to] = edge.from;
+        }
+    }
+
+    std::vector<int32_t> flatPinFrom;
+    std::vector<int32_t> flatPinTo;
+    std::vector<int32_t> edgeDirections;
+    std::vector<int32_t> debugGridFromX;
+    std::vector<int32_t> debugGridFromY;
+    std::vector<int32_t> debugGridToX;
+    std::vector<int32_t> debugGridToY;
+    std::vector<int32_t> flatPinToStart;
+    flatPinToStart.reserve(static_cast<size_t>(numPins) + 1);
+    flatPinToStart.push_back(0);
+    for (int pinId = 0; pinId < numPins; ++pinId) {
+        for (const LShapeEdgeRecord& edge : children[pinId]) {
+            flatPinFrom.push_back(edge.from);
+            flatPinTo.push_back(edge.to);
+            edgeDirections.push_back(edge.direction);
+            debugGridFromX.push_back(edge.grid_from_x);
+            debugGridFromY.push_back(edge.grid_from_y);
+            debugGridToX.push_back(edge.grid_to_x);
+            debugGridToY.push_back(edge.grid_to_y);
+        }
+        flatPinToStart.push_back(static_cast<int32_t>(flatPinTo.size()));
+    }
+
+    std::vector<int32_t> netFlatTopoSort;
+    std::vector<int32_t> netFlatTopoSortStart;
+    std::vector<int32_t> netVertexStart;
+    netFlatTopoSort.reserve(flatNet2PinMap.size());
+    for (int pinId : flatNet2PinMap) {
+        netFlatTopoSort.push_back(static_cast<int32_t>(pinId));
+    }
+    netFlatTopoSortStart.reserve(flatNet2PinStart.size());
+    netVertexStart.reserve(flatNet2PinStart.size());
+    for (int start : flatNet2PinStart) {
+        netFlatTopoSortStart.push_back(static_cast<int32_t>(start));
+        netVertexStart.push_back(static_cast<int32_t>(start));
+    }
+
+    std::vector<int32_t> netSteinerStart(static_cast<size_t>(numNets) + 1, static_cast<int32_t>(numPins));
+
+    pybind11::dict metadata;
+    metadata["schema_version"] = pybind11::int_(1);
+    metadata["num_pins"] = pybind11::int_(numPins);
+    metadata["num_vertices"] = pybind11::int_(numPins);
+    metadata["num_edges"] = pybind11::int_(static_cast<int>(flatPinFrom.size()));
+    metadata["num_nets"] = pybind11::int_(numNets);
+    metadata["route_grid_shape"] = pybind11::make_tuple(routeNumBinsX, routeNumBinsY);
+    metadata["route_failed_count"] = pybind11::int_(routeFailedCount);
+    metadata["skipped_unmapped_net_count"] = pybind11::int_(skippedUnmappedNetCount);
+    metadata["unmapped_pin_access_count"] = pybind11::int_(unmappedPinCount);
+    metadata["xl"] = pybind11::float_(xl);
+    metadata["yl"] = pybind11::float_(yl);
+    metadata["route_bin_size_x"] = pybind11::float_(routeBinSizeX);
+    metadata["route_bin_size_y"] = pybind11::float_(routeBinSizeY);
+
+    pybind11::dict pack;
+    pack["pin_relate_x"] = vectorToNumpy(pinRelateX);
+    pack["pin_relate_y"] = vectorToNumpy(pinRelateY);
+    pack["net_vertex_start"] = vectorToNumpy(netVertexStart);
+    pack["net_steiner_start"] = vectorToNumpy(netSteinerStart);
+    pack["pin_fa"] = vectorToNumpy(pinFa);
+    pack["flat_pin_to"] = vectorToNumpy(flatPinTo);
+    pack["flat_pin_from"] = vectorToNumpy(flatPinFrom);
+    pack["flat_pin_to_start"] = vectorToNumpy(flatPinToStart);
+    pack["net_flat_topo_sort"] = vectorToNumpy(netFlatTopoSort);
+    pack["net_flat_topo_sort_start"] = vectorToNumpy(netFlatTopoSortStart);
+    pack["edge_l_directions"] = vectorToNumpy(edgeDirections);
+    pack["metadata"] = metadata;
+    pack["debug_grid_from_x"] = vectorToNumpy(debugGridFromX);
+    pack["debug_grid_from_y"] = vectorToNumpy(debugGridFromY);
+    pack["debug_grid_to_x"] = vectorToNumpy(debugGridToX);
+    pack["debug_grid_to_y"] = vectorToNumpy(debugGridToY);
+    return pack;
+}
+
 }  // namespace
 
 bool loadGRParams(const pybind11::dict& kwargs) {
@@ -530,6 +944,48 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
             },
             pybind11::arg("net_name_to_id"),
             pybind11::arg("max_gap") = 1,
+            pybind11::arg("route_num_bins_x") = 0,
+            pybind11::arg("route_num_bins_y") = 0,
+            pybind11::arg("xl") = 0.0,
+            pybind11::arg("yl") = 0.0,
+            pybind11::arg("route_bin_size_x") = 1.0,
+            pybind11::arg("route_bin_size_y") = 1.0)
+        .def(
+            "l_shape_topology_pack",
+            [](gr::RouteForce& routeforce,
+               pybind11::dict pinNameToId,
+               pybind11::dict netNameToId,
+               pybind11::object flatNet2PinMap,
+               pybind11::object flatNet2PinStart,
+               int numPins,
+               int numNets,
+               int routeNumBinsX,
+               int routeNumBinsY,
+               double xl,
+               double yl,
+               double routeBinSizeX,
+               double routeBinSizeY) {
+                return buildLShapeTopologyPack(
+                    routeforce,
+                    pinNameToId,
+                    netNameToId,
+                    flatNet2PinMap,
+                    flatNet2PinStart,
+                    numPins,
+                    numNets,
+                    routeNumBinsX,
+                    routeNumBinsY,
+                    xl,
+                    yl,
+                    routeBinSizeX,
+                    routeBinSizeY);
+            },
+            pybind11::arg("pin_name_to_id"),
+            pybind11::arg("net_name_to_id"),
+            pybind11::arg("flat_net2pin_map"),
+            pybind11::arg("flat_net2pin_start_map"),
+            pybind11::arg("num_pins"),
+            pybind11::arg("num_nets"),
             pybind11::arg("route_num_bins_x") = 0,
             pybind11::arg("route_num_bins_y") = 0,
             pybind11::arg("xl") = 0.0,
