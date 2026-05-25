@@ -3,6 +3,11 @@
 
 namespace gr {
 
+enum class GGRBackend { CUDA, CPU_PR, AUTO };
+
+GGRBackend parseGGRBackend(const std::string& value);
+std::string ggrBackendName(GGRBackend backend);
+
 class GRSetting {
 public:
     // 1. SystemSetting
@@ -15,6 +20,9 @@ public:
 
     // 3. The number of Rip-up and Reroute iterations (if 0, only PR is invoked)
     int rrrIters = 0;
+
+    GGRBackend backend = GGRBackend::AUTO;
+    GGRBackend resolvedBackend = GGRBackend::AUTO;
 
     std::string routeGuideFile = "";
 

@@ -1,6 +1,10 @@
 #pragma once
 #include "common/common.h"
+#include "gpugr/db/GRSetting.h"
+#include "gpugr/gr/CPURouter.h"
+#if ENABLE_CUDA
 #include "gpugr/gr/GPURouter.h"
+#endif
 
 namespace gr {
 class GRDatabase;
@@ -68,8 +72,15 @@ public:
     gr::GRDatabase& getGRDatabase();
 
 private:
+    [[noreturn]] void unsupported(const std::string& operation);
+    GGRBackend resolveBackend();
+
     gr::GRDatabase& grdb;
+#if ENABLE_CUDA
     gr::GPURouter router;
+#endif
+    gr::CPURouter cpuRouter;
+    GGRBackend backend = GGRBackend::AUTO;
 };
 
 }  // namespace gr

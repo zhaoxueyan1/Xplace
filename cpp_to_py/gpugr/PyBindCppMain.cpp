@@ -899,6 +899,21 @@ bool loadGRParams(const pybind11::dict& kwargs) {
         gr::grSetting.routeGuideFile = kwargs["route_guide"].cast<std::string>();
     }
 
+    if (kwargs.contains("backend")) {
+        gr::grSetting.backend = gr::parseGGRBackend(kwargs["backend"].cast<std::string>());
+    }
+
+    if (gr::grSetting.backend == gr::GGRBackend::CPU_PR && gr::grSetting.rrrIters > 0) {
+        throw std::runtime_error(
+            "backend=cpu_pr operation=load_gr_params only supports rrr_iters=0; CPU RRR is unsupported");
+    }
+#if !ENABLE_CUDA
+    if (gr::grSetting.backend == gr::GGRBackend::CUDA) {
+        throw std::runtime_error(
+            "backend=cuda operation=load_gr_params requested, but CUDA support is unavailable");
+    }
+#endif
+
     return true;
 }
 
@@ -1016,6 +1031,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         return routeforce;
     });
     m.def("load_gr_params", &loadGRParams, "Parse input args to DB and return graph information");
+    m.def("cuda_enabled", []() { return static_cast<bool>(ENABLE_CUDA); });
+    m.def("resolved_backend", []() { return gr::ggrBackendName(gr::grSetting.resolvedBackend); });
     m.def("read_flute", &Flute::readLUT, "Read Flute LUT");
 }
 

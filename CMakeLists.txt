@@ -1,10 +1,8 @@
 cmake_minimum_required(VERSION 3.24)
 
-if (NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
-  set(CMAKE_CUDA_ARCHITECTURES 80 86 CACHE STRING "CUDA architectures" FORCE)
-endif()
+option(XPLACE_ENABLE_CUDA "Build Xplace CUDA extension targets when CUDA-capable Torch is available" ON)
 
-project(xplace LANGUAGES C CXX CUDA)
+project(xplace LANGUAGES C CXX)
 
 if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Release)
@@ -52,20 +50,6 @@ find_package(Cairo)
 message(STATUS "CAIRO_INCLUDE_DIRS: ${CAIRO_INCLUDE_DIRS}")
 message(STATUS "CAIRO_LIBRARIES: ${CAIRO_LIBRARIES}")
 
-# CUDA
-message(STATUS "CMAKE_CUDA_ARCHITECTURES: ${CMAKE_CUDA_ARCHITECTURES}")
-find_package(CUDAToolkit)
-
-# set nvcc flags
-set(CUDA_USE_STATIC_CUDA_RUNTIME OFF)
-set(CMAKE_CUDA17_EXTENSION_COMPILE_OPTION "-std=c++17")
-list(APPEND BASIC_CUDA_FLAGS --compiler-options;-fPIC;-std=c++17)
-list(APPEND BASIC_CUDA_FLAGS --expt-relaxed-constexpr) # suppress warning from pytorch
-message(STATUS "BASIC_CUDA_FLAGS: ${BASIC_CUDA_FLAGS}")
-add_compile_options(
-  "$<$<COMPILE_LANGUAGE:CUDA>:${BASIC_CUDA_FLAGS}>"
-)
-
 # Torch
 execute_process(COMMAND ${PYTHON_EXECUTABLE} -c 
   "import torch; print(torch.__path__[0]); print(int(torch.backends.cuda.is_built() and torch.version.cuda is not None)); print(torch.__version__);" 
@@ -80,8 +64,25 @@ list(GET TORCH_VERSION_LIST 1 TORCH_VERSION_MINOR)
 message(STATUS TORCH_INSTALL_PREFIX=${TORCH_INSTALL_PREFIX})
 message(STATUS TORCH_VERSION=${TORCH_VERSION_MAJOR}.${TORCH_VERSION_MINOR})
 message(STATUS TORCH_ENABLE_CUDA=${TORCH_ENABLE_CUDA})
-if (NOT TORCH_ENABLE_CUDA)
-  message(FATAL_ERROR "Xplace only supports Torch-CUDA mode, exit CMAKE." )
+
+if (XPLACE_ENABLE_CUDA AND TORCH_ENABLE_CUDA)
+  if (NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+    set(CMAKE_CUDA_ARCHITECTURES 80 86 CACHE STRING "CUDA architectures" FORCE)
+  endif()
+  enable_language(CUDA)
+  find_package(CUDAToolkit REQUIRED)
+  set(CUDA_USE_STATIC_CUDA_RUNTIME OFF)
+  set(CMAKE_CUDA17_EXTENSION_COMPILE_OPTION "-std=c++17")
+  list(APPEND BASIC_CUDA_FLAGS --compiler-options;-fPIC;-std=c++17)
+  list(APPEND BASIC_CUDA_FLAGS --expt-relaxed-constexpr)
+  message(STATUS "CMAKE_CUDA_ARCHITECTURES: ${CMAKE_CUDA_ARCHITECTURES}")
+  message(STATUS "BASIC_CUDA_FLAGS: ${BASIC_CUDA_FLAGS}")
+  add_compile_options(
+    "$<$<COMPILE_LANGUAGE:CUDA>:${BASIC_CUDA_FLAGS}>"
+  )
+else()
+  set(TORCH_ENABLE_CUDA 0)
+  message(STATUS "Xplace CUDA targets disabled; building CPU-compatible targets only")
 endif()
 
 # set torch lib
