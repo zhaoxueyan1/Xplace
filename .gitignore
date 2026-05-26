@@ -4,6 +4,7 @@
 __pycache__/
 *.so
 build/
+build_cpu_pr/
 *.log
 *.npy
 *.csv
