@@ -229,6 +229,64 @@ pybind11::dict decodeViaEntry(const gr::GRDatabase& grdb,
     return entry;
 }
 
+pybind11::dict buildGRNetSummary(gr::GRDatabase& grdb) {
+    pybind11::dict summary;
+    uint64_t routeableCount = 0;
+    uint64_t norouteCount = 0;
+    uint64_t pinGroupCount = 0;
+    uint64_t pinGridCount = 0;
+    uint64_t pinGpdbRefCount = 0;
+    uint64_t bboxChecksum = 1469598103934665603ULL;
+    uint64_t pinChecksum = 1099511628211ULL;
+    uint64_t norouteChecksum = 7809847782465536322ULL;
+
+    for (size_t netId = 0; netId < grdb.grNets.size(); ++netId) {
+        auto& net = grdb.grNets[netId];
+        if (net.noroute) {
+            norouteCount++;
+            norouteChecksum = norouteChecksum * 1099511628211ULL + static_cast<uint64_t>(netId + 1) * 97ULL;
+        } else {
+            routeableCount++;
+        }
+
+        bboxChecksum = bboxChecksum * 1099511628211ULL + static_cast<uint64_t>(netId + 1) * 1315423911ULL;
+        bboxChecksum = bboxChecksum * 1099511628211ULL + static_cast<uint64_t>(net.lowerx) * 31ULL;
+        bboxChecksum = bboxChecksum * 1099511628211ULL + static_cast<uint64_t>(net.lowery) * 37ULL;
+        bboxChecksum = bboxChecksum * 1099511628211ULL + static_cast<uint64_t>(net.upperx) * 41ULL;
+        bboxChecksum = bboxChecksum * 1099511628211ULL + static_cast<uint64_t>(net.uppery) * 43ULL;
+        bboxChecksum = bboxChecksum * 1099511628211ULL + static_cast<uint64_t>(net.noroute) * 47ULL;
+
+        const auto& pins = net.getPins();
+        pinGroupCount += static_cast<uint64_t>(pins.size());
+        for (size_t pinGroupId = 0; pinGroupId < pins.size(); ++pinGroupId) {
+            const auto& pinGroup = pins[pinGroupId];
+            pinGridCount += static_cast<uint64_t>(pinGroup.size());
+            pinChecksum = pinChecksum * 1099511628211ULL + static_cast<uint64_t>(netId + 1) * 53ULL;
+            pinChecksum = pinChecksum * 1099511628211ULL + static_cast<uint64_t>(pinGroupId + 1) * 59ULL;
+            for (int gridId : pinGroup) {
+                pinChecksum = pinChecksum * 1099511628211ULL + static_cast<uint64_t>(gridId + 1) * 61ULL;
+            }
+        }
+        for (const auto& gpdbPins : net.pin2gpdbPinIds) {
+            pinGpdbRefCount += static_cast<uint64_t>(gpdbPins.size());
+            for (int gpdbPinId : gpdbPins) {
+                pinChecksum = pinChecksum * 1099511628211ULL + static_cast<uint64_t>(gpdbPinId + 1) * 67ULL;
+            }
+        }
+    }
+
+    summary["num_gr_nets"] = pybind11::int_(static_cast<uint64_t>(grdb.grNets.size()));
+    summary["routeable_net_count"] = pybind11::int_(routeableCount);
+    summary["noroute_net_count"] = pybind11::int_(norouteCount);
+    summary["pin_group_count"] = pybind11::int_(pinGroupCount);
+    summary["pin_grid_count"] = pybind11::int_(pinGridCount);
+    summary["pin_gpdb_ref_count"] = pybind11::int_(pinGpdbRefCount);
+    summary["bbox_checksum"] = pybind11::int_(bboxChecksum);
+    summary["pin_checksum"] = pybind11::int_(pinChecksum);
+    summary["noroute_checksum"] = pybind11::int_(norouteChecksum);
+    return summary;
+}
+
 pybind11::list buildRouteEntries(gr::RouteForce& routeforce) {
     pybind11::list allNets;
     auto rawRoutes = routeforce.getRawRoutes();
@@ -282,10 +340,10 @@ pybind11::list buildRouteEntries(gr::RouteForce& routeforce) {
 }
 
 pybind11::dict packTopologyRecords(const std::map<int, PackedTopologyRecord>& records,
-                                   double xl,
-                                   double yl,
-                                   double routeBinSizeX,
-                                   double routeBinSizeY) {
+                                   float xl,
+                                   float yl,
+                                   float routeBinSizeX,
+                                   float routeBinSizeY) {
     std::vector<int32_t> netIds;
     std::vector<int32_t> netIndexById;
     std::vector<int32_t> hSegOffsets;
@@ -303,10 +361,6 @@ pybind11::dict packTopologyRecords(const std::map<int, PackedTopologyRecord>& re
     hSegOffsets.push_back(0);
     vSegOffsets.push_back(0);
 
-    float xlF = static_cast<float>(xl);
-    float ylF = static_cast<float>(yl);
-    float routeBinSizeXF = static_cast<float>(routeBinSizeX);
-    float routeBinSizeYF = static_cast<float>(routeBinSizeY);
     int maxNetId = -1;
 
     for (const auto& [netId, record] : records) {
@@ -315,11 +369,11 @@ pybind11::dict packTopologyRecords(const std::map<int, PackedTopologyRecord>& re
 
         int32_t hCount = 0;
         for (const auto& [rowIdx, intervals] : record.horizontal_by_row) {
-            float segY = gridCenter(rowIdx, ylF, routeBinSizeYF);
+            float segY = gridCenter(rowIdx, yl, routeBinSizeY);
             for (const IntInterval& interval : intervals) {
-                hX1.push_back(gridCenter(interval.lo, xlF, routeBinSizeXF));
+                hX1.push_back(gridCenter(interval.lo, xl, routeBinSizeX));
                 hY.push_back(segY);
-                hX2.push_back(gridCenter(interval.hi, xlF, routeBinSizeXF));
+                hX2.push_back(gridCenter(interval.hi, xl, routeBinSizeX));
                 ++hCount;
             }
         }
@@ -327,11 +381,11 @@ pybind11::dict packTopologyRecords(const std::map<int, PackedTopologyRecord>& re
 
         int32_t vCount = 0;
         for (const auto& [colIdx, intervals] : record.vertical_by_col) {
-            float segX = gridCenter(colIdx, xlF, routeBinSizeXF);
+            float segX = gridCenter(colIdx, xl, routeBinSizeX);
             for (const IntInterval& interval : intervals) {
                 vX.push_back(segX);
-                vY1.push_back(gridCenter(interval.lo, ylF, routeBinSizeYF));
-                vY2.push_back(gridCenter(interval.hi, ylF, routeBinSizeYF));
+                vY1.push_back(gridCenter(interval.lo, yl, routeBinSizeY));
+                vY2.push_back(gridCenter(interval.hi, yl, routeBinSizeY));
                 ++vCount;
             }
         }
@@ -367,10 +421,10 @@ pybind11::dict buildSameNetTopologyPack(gr::RouteForce& routeforce,
                                         int maxGap,
                                         int routeNumBinsX,
                                         int routeNumBinsY,
-                                        double xl,
-                                        double yl,
-                                        double routeBinSizeX,
-                                        double routeBinSizeY) {
+                                        float xl,
+                                        float yl,
+                                        float routeBinSizeX,
+                                        float routeBinSizeY) {
     auto rawRoutes = routeforce.getRawRoutes();
     auto& grdb = routeforce.getGRDatabase();
     const auto& gpNets = grdb.gpdb.getNets();
@@ -501,10 +555,6 @@ struct LShapeEdgeRecord {
     int from = -1;
     int to = -1;
     int direction = 0;
-    int grid_from_x = 0;
-    int grid_from_y = 0;
-    int grid_to_x = 0;
-    int grid_to_y = 0;
 };
 
 int intervalOverlapLength(const std::vector<IntInterval>& intervals, int lo, int hi) {
@@ -592,7 +642,7 @@ int chooseLShapeDirection(const PackedTopologyRecord& routeRecord,
                           const gp::point_type& pinPosB,
                           const PinAccessGrid& accessA,
                           const PinAccessGrid& accessB) {
-    constexpr double kCoordEps = 1e-3;
+    constexpr float kCoordEps = 1e-3f;
     if (std::abs(pinPosA.first - pinPosB.first) <= kCoordEps ||
         std::abs(pinPosA.second - pinPosB.second) <= kCoordEps) {
         return 2;
@@ -629,10 +679,10 @@ pybind11::dict buildLShapeTopologyPack(gr::RouteForce& routeforce,
                                        int numNets,
                                        int routeNumBinsX,
                                        int routeNumBinsY,
-                                       double xl,
-                                       double yl,
-                                       double routeBinSizeX,
-                                       double routeBinSizeY) {
+                                       float xl,
+                                       float yl,
+                                       float routeBinSizeX,
+                                       float routeBinSizeY) {
     if (numPins <= 0 || numNets < 0) {
         throw std::runtime_error("GGR L-shape topology pack requires positive num_pins and non-negative num_nets");
     }
@@ -768,10 +818,6 @@ pybind11::dict buildLShapeTopologyPack(gr::RouteForce& routeforce,
                 mappedGlobalPins[i - 1],
                 mappedGlobalPins[i],
                 direction,
-                accessItA->second.x,
-                accessItA->second.y,
-                accessItB->second.x,
-                accessItB->second.y,
             });
         }
     }
@@ -784,38 +830,33 @@ pybind11::dict buildLShapeTopologyPack(gr::RouteForce& routeforce,
         pinRelateY[pinId] = pinId;
     }
 
-    std::vector<std::vector<LShapeEdgeRecord>> children(static_cast<size_t>(numPins));
+    std::vector<int32_t> outDegree(static_cast<size_t>(numPins), static_cast<int32_t>(0));
     for (const LShapeEdgeRecord& edge : edgeRecords) {
         if (edge.from < 0 || edge.from >= numPins || edge.to < 0 || edge.to >= numPins) {
             throw std::runtime_error("GGR L-shape topology pack generated edge index out of range");
         }
-        children[edge.from].push_back(edge);
+        ++outDegree[static_cast<size_t>(edge.from)];
         if (pinFa[edge.to] < 0) {
             pinFa[edge.to] = edge.from;
         }
     }
 
-    std::vector<int32_t> flatPinFrom;
-    std::vector<int32_t> flatPinTo;
-    std::vector<int32_t> edgeDirections;
-    std::vector<int32_t> debugGridFromX;
-    std::vector<int32_t> debugGridFromY;
-    std::vector<int32_t> debugGridToX;
-    std::vector<int32_t> debugGridToY;
-    std::vector<int32_t> flatPinToStart;
-    flatPinToStart.reserve(static_cast<size_t>(numPins) + 1);
-    flatPinToStart.push_back(0);
+    std::vector<int32_t> flatPinToStart(static_cast<size_t>(numPins) + 1, static_cast<int32_t>(0));
     for (int pinId = 0; pinId < numPins; ++pinId) {
-        for (const LShapeEdgeRecord& edge : children[pinId]) {
-            flatPinFrom.push_back(edge.from);
-            flatPinTo.push_back(edge.to);
-            edgeDirections.push_back(edge.direction);
-            debugGridFromX.push_back(edge.grid_from_x);
-            debugGridFromY.push_back(edge.grid_from_y);
-            debugGridToX.push_back(edge.grid_to_x);
-            debugGridToY.push_back(edge.grid_to_y);
-        }
-        flatPinToStart.push_back(static_cast<int32_t>(flatPinTo.size()));
+        flatPinToStart[static_cast<size_t>(pinId) + 1] =
+            flatPinToStart[static_cast<size_t>(pinId)] + outDegree[static_cast<size_t>(pinId)];
+    }
+
+    const size_t numEdges = edgeRecords.size();
+    std::vector<int32_t> flatPinFrom(numEdges);
+    std::vector<int32_t> flatPinTo(numEdges);
+    std::vector<int32_t> edgeDirections(numEdges);
+    std::vector<int32_t> cursor(flatPinToStart.begin(), flatPinToStart.end() - 1);
+    for (const LShapeEdgeRecord& edge : edgeRecords) {
+        const size_t writeIdx = static_cast<size_t>(cursor[static_cast<size_t>(edge.from)]++);
+        flatPinFrom[writeIdx] = static_cast<int32_t>(edge.from);
+        flatPinTo[writeIdx] = static_cast<int32_t>(edge.to);
+        edgeDirections[writeIdx] = static_cast<int32_t>(edge.direction);
     }
 
     std::vector<int32_t> netFlatTopoSort;
@@ -862,10 +903,6 @@ pybind11::dict buildLShapeTopologyPack(gr::RouteForce& routeforce,
     pack["net_flat_topo_sort_start"] = vectorToNumpy(netFlatTopoSortStart);
     pack["edge_l_directions"] = vectorToNumpy(edgeDirections);
     pack["metadata"] = metadata;
-    pack["debug_grid_from_x"] = vectorToNumpy(debugGridFromX);
-    pack["debug_grid_from_y"] = vectorToNumpy(debugGridFromY);
-    pack["debug_grid_to_x"] = vectorToNumpy(debugGridToX);
-    pack["debug_grid_to_y"] = vectorToNumpy(debugGridToY);
     return pack;
 }
 
@@ -921,6 +958,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     pybind11::class_<gr::GRDatabase, std::shared_ptr<gr::GRDatabase>>(m, "GRDatabase")
         .def(pybind11::init<std::shared_ptr<db::Database>, std::shared_ptr<gp::GPDatabase>>())
         .def("report_gr_stat", &gr::GRDatabase::reportGRStat)
+        .def("grnet_summary", [](gr::GRDatabase& grdb) { return buildGRNetSummary(grdb); })
         .def("setup_capacity", &gr::GRDatabase::setupCapacity)
         .def("setup_wiredist", &gr::GRDatabase::setupWireDist)
         .def("setup_obs", &gr::GRDatabase::setupObs)
@@ -942,10 +980,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
                int maxGap,
                int routeNumBinsX,
                int routeNumBinsY,
-               double xl,
-               double yl,
-               double routeBinSizeX,
-               double routeBinSizeY) {
+               float xl,
+               float yl,
+               float routeBinSizeX,
+               float routeBinSizeY) {
                 return buildSameNetTopologyPack(
                     routeforce,
                     netNameToId,
@@ -976,10 +1014,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
                int numNets,
                int routeNumBinsX,
                int routeNumBinsY,
-               double xl,
-               double yl,
-               double routeBinSizeX,
-               double routeBinSizeY) {
+               float xl,
+               float yl,
+               float routeBinSizeX,
+               float routeBinSizeY) {
                 return buildLShapeTopologyPack(
                     routeforce,
                     pinNameToId,

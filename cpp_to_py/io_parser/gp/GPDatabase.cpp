@@ -569,12 +569,20 @@ bool GPDatabase::reset() {
     num_nodes = 0;
     num_pins = 0;
     num_nets = 0;
+    num_regions = 0;
+    num_celltype = 0;
 
     nodes.clear();
     pins.clear();
     nets.clear();
+    regions.clear();
+    node_names.clear();
+    net_names.clear();
+    pin_names.clear();
 
     node_types_indices.clear();
+    node_id2node_name.clear();
+    node_id2celltype_name.clear();
 
     pin_id2node_id.clear();
     pin_id2net_id.clear();
@@ -629,7 +637,8 @@ const int GPDatabase::getM1Direction() const { return database.getRLayer(0)->dir
 
 // Torch Related
 torch::Tensor GPDatabase::getNodeLPosTensor() {
-    torch::Tensor node_lpos = torch::zeros({num_nodes, 2});
+    auto options = torch::TensorOptions().dtype(torch::kFloat32);
+    torch::Tensor node_lpos = torch::zeros({num_nodes, 2}, options);
     auto node_lpos_a = node_lpos.accessor<coord_type, 2>();
     for (auto& node : nodes) {
         node_lpos_a[node.getId()][0] = node.getLx();
@@ -639,7 +648,8 @@ torch::Tensor GPDatabase::getNodeLPosTensor() {
 }
 
 torch::Tensor GPDatabase::getNodeCPosTensor() {
-    torch::Tensor node_cpos = torch::zeros({num_nodes, 2});
+    auto options = torch::TensorOptions().dtype(torch::kFloat32);
+    torch::Tensor node_cpos = torch::zeros({num_nodes, 2}, options);
     auto node_cpos_a = node_cpos.accessor<coord_type, 2>();
     for (auto& node : nodes) {
         node_cpos_a[node.getId()][0] = node.getLx() + node.getWidth() / 2;
@@ -649,7 +659,8 @@ torch::Tensor GPDatabase::getNodeCPosTensor() {
 }
 
 torch::Tensor GPDatabase::getNodeSizeTensor() {
-    torch::Tensor node_size = torch::zeros({num_nodes, 2});
+    auto options = torch::TensorOptions().dtype(torch::kFloat32);
+    torch::Tensor node_size = torch::zeros({num_nodes, 2}, options);
     auto node_size_a = node_size.accessor<coord_type, 2>();
     for (auto& node : nodes) {
         if (!node.getIsPolygonShape()) {
@@ -666,7 +677,8 @@ torch::Tensor GPDatabase::getNodeSizeTensor() {
 
 torch::Tensor GPDatabase::getPinRelLPosTensor() {
     // pin_pos == (node_pos - node_size / 2) + (pin_rel_lpos + pin_size / 2)
-    torch::Tensor pin_rel_lpos = torch::zeros({num_pins, 2});
+    auto options = torch::TensorOptions().dtype(torch::kFloat32);
+    torch::Tensor pin_rel_lpos = torch::zeros({num_pins, 2}, options);
     auto pin_rel_lpos_a = pin_rel_lpos.accessor<coord_type, 2>();
     for (auto& pin : pins) {
         pin_rel_lpos_a[pin.getId()][0] = pin.getRelLx();
@@ -677,7 +689,8 @@ torch::Tensor GPDatabase::getPinRelLPosTensor() {
 
 torch::Tensor GPDatabase::getPinRelCPosTensor() {
     // pin_pos == node_pos + pin_rel_cpos
-    torch::Tensor pin_rel_cpos = torch::zeros({num_pins, 2});
+    auto options = torch::TensorOptions().dtype(torch::kFloat32);
+    torch::Tensor pin_rel_cpos = torch::zeros({num_pins, 2}, options);
     auto pin_rel_cpos_a = pin_rel_cpos.accessor<coord_type, 2>();
     for (auto& pin : pins) {
         auto& node = nodes[pin.getParNodeId()];
@@ -688,7 +701,8 @@ torch::Tensor GPDatabase::getPinRelCPosTensor() {
 }
 
 torch::Tensor GPDatabase::getPinSizeTensor() {
-    torch::Tensor pin_size = torch::zeros({num_pins, 2});
+    auto options = torch::TensorOptions().dtype(torch::kFloat32);
+    torch::Tensor pin_size = torch::zeros({num_pins, 2}, options);
     auto pin_size_a = pin_size.accessor<coord_type, 2>();
     for (auto& pin : pins) {
         pin_size_a[pin.getId()][0] = pin.getWidth();
@@ -771,6 +785,7 @@ std::vector<torch::Tensor> GPDatabase::getNode2PinInfoTensor() {
 
 std::vector<torch::Tensor> GPDatabase::getRegionInfoTensor() {
     auto options_int = torch::TensorOptions().dtype(torch::kInt64);
+    auto options_float = torch::TensorOptions().dtype(torch::kFloat32);
 
     unsigned num_boxes = 0;
     for (auto& region : regions) {
@@ -778,7 +793,7 @@ std::vector<torch::Tensor> GPDatabase::getRegionInfoTensor() {
     }
 
     torch::Tensor node_id2region_id = torch::zeros({num_nodes}, options_int);
-    torch::Tensor region_boxes = torch::zeros({num_boxes, 4});
+    torch::Tensor region_boxes = torch::zeros({num_boxes, 4}, options_float);
     torch::Tensor region_boxes_end = torch::zeros({num_regions}, options_int);
 
     auto node_id2region_id_a = node_id2region_id.accessor<index_type, 1>();
@@ -811,6 +826,7 @@ std::vector<torch::Tensor> GPDatabase::getRegionInfoTensor() {
 
 std::vector<torch::Tensor> GPDatabase::getSnetInfoTensor() {
     auto options_int = torch::TensorOptions().dtype(torch::kInt64);
+    auto options_float = torch::TensorOptions().dtype(torch::kFloat32);
 
     unsigned num_snetshapes = 0;
     for (size_t snetId = 0; snetId < database.snets.size(); snetId++) {
@@ -820,8 +836,8 @@ std::vector<torch::Tensor> GPDatabase::getSnetInfoTensor() {
         }
     }
 
-    torch::Tensor snet_lpos = torch::zeros({num_snetshapes, 2});
-    torch::Tensor snet_size = torch::zeros({num_snetshapes, 2});
+    torch::Tensor snet_lpos = torch::zeros({num_snetshapes, 2}, options_float);
+    torch::Tensor snet_size = torch::zeros({num_snetshapes, 2}, options_float);
     torch::Tensor snet_layer = torch::zeros({num_snetshapes}, options_int);
 
     auto snet_lpos_a = snet_lpos.accessor<coord_type, 2>();
@@ -909,6 +925,138 @@ void GPDatabase::applyNodeLPosKeepOrient(torch::Tensor node_lpos) {
         auto cell = database.cells[node.getOriDBId()];
         cell->place(std::lround(node.getLx()), std::lround(node.getLy()));
     }
+}
+
+namespace {
+
+std::vector<std::pair<int, int>> normalizeRowYOrientPairs(std::vector<std::pair<int, int>> rowYOrient) {
+    std::sort(rowYOrient.begin(), rowYOrient.end(), [](const auto& lhs, const auto& rhs) {
+        return lhs.first < rhs.first;
+    });
+    return rowYOrient;
+}
+
+void applyNodeLPosLikeIEDAWritebackImpl(std::vector<GPNode>& nodes,
+                                        db::Database& database,
+                                        torch::Tensor node_lpos,
+                                        std::vector<std::pair<int, int>> rowYOrient) {
+    TORCH_CHECK(node_lpos.dtype() == torch::kFloat32,
+                "apply_node_lpos_like_ieda_writeback expects a float32 tensor");
+    TORCH_CHECK(node_lpos.dim() == 2 && node_lpos.size(1) == 2,
+                "apply_node_lpos_like_ieda_writeback expects shape [num_nodes, 2]");
+    TORCH_CHECK(node_lpos.is_contiguous(),
+                "apply_node_lpos_like_ieda_writeback expects a contiguous tensor");
+    rowYOrient = normalizeRowYOrientPairs(std::move(rowYOrient));
+
+    const float* node_lpos_ptr = node_lpos.data_ptr<float>();
+    for (auto& node : nodes) {
+        if (node.getNodeType() != "Mov" && node.getNodeType() != "FloatMov") {
+            continue;
+        }
+        const int lx = std::lround(node_lpos_ptr[node.getId() * 2 + 0]);
+        const int ly = std::lround(node_lpos_ptr[node.getId() * 2 + 1]);
+        node.setLx(lx);
+        node.setLy(ly);
+        auto cell = database.cells[node.getOriDBId()];
+        if (cell->ctype()->cls != "BLOCK" && !rowYOrient.empty()) {
+            auto rowIt = std::lower_bound(rowYOrient.begin(), rowYOrient.end(), ly, [](const auto& lhs, int rowY) {
+                return lhs.first < rowY;
+            });
+            if (rowIt == rowYOrient.end()) {
+                rowIt = rowYOrient.end() - 1;
+            }
+            node.setOrient(rowIt->second);
+            cell->place(lx, ly, node.getOrient());
+        } else {
+            cell->place(lx, ly);
+        }
+    }
+}
+
+}  // namespace
+
+void GPDatabase::applyNodeLPosLikeIEDAWriteback(torch::Tensor node_lpos) {
+    applyNodeLPosLikeIEDAWritebackImpl(nodes, database, node_lpos, getRowYOrientPairs());
+}
+
+void GPDatabase::applyNodeLPosLikeIEDAWriteback(torch::Tensor node_lpos, std::vector<std::pair<int, int>> row_y_orient) {
+    applyNodeLPosLikeIEDAWritebackImpl(nodes, database, node_lpos, std::move(row_y_orient));
+}
+
+std::vector<std::pair<int, int>> GPDatabase::getRowYOrientPairs() const {
+    std::vector<std::pair<int, int>> rowYOrient;
+    rowYOrient.reserve(database.rows.size());
+    for (auto row : database.rows) {
+        rowYOrient.emplace_back(row->y(), row->orient());
+    }
+    return normalizeRowYOrientPairs(std::move(rowYOrient));
+}
+
+std::unordered_map<std::string, uint64_t> GPDatabase::getPlacementSummary() const {
+    std::unordered_map<std::string, uint64_t> summary;
+    uint64_t rawMovableCount = 0;
+    uint64_t rawFixedCount = 0;
+    uint64_t rawBlockCount = 0;
+    uint64_t rawCoordChecksum = 1469598103934665603ULL;
+    uint64_t rawOrientChecksum = 1099511628211ULL;
+    for (size_t cellId = 0; cellId < database.cells.size(); ++cellId) {
+        auto cell = database.cells[cellId];
+        if (cell->fixed()) {
+            rawFixedCount++;
+        } else {
+            rawMovableCount++;
+        }
+        if (cell->ctype()->cls == "BLOCK") {
+            rawBlockCount++;
+        }
+        rawCoordChecksum = rawCoordChecksum * 1099511628211ULL + static_cast<uint64_t>(cellId + 1) * 1315423911ULL;
+        rawCoordChecksum = rawCoordChecksum * 1099511628211ULL + static_cast<uint64_t>(cell->lx()) * 31ULL;
+        rawCoordChecksum = rawCoordChecksum * 1099511628211ULL + static_cast<uint64_t>(cell->ly()) * 37ULL;
+        rawOrientChecksum = rawOrientChecksum * 1099511628211ULL + static_cast<uint64_t>(cellId + 1) * 2654435761ULL;
+        rawOrientChecksum = rawOrientChecksum * 1099511628211ULL + static_cast<uint64_t>(cell->orient()) * 97ULL;
+    }
+
+    uint64_t gpMovableCount = 0;
+    uint64_t gpCoordChecksum = 7809847782465536322ULL;
+    uint64_t gpOrientChecksum = 7809847782465536322ULL;
+    uint64_t gpPinChecksum = 2166136261ULL;
+    for (const auto& node : nodes) {
+        if (node.getNodeType() == "Mov" || node.getNodeType() == "FloatMov") {
+            gpMovableCount++;
+        }
+        gpCoordChecksum = gpCoordChecksum * 1099511628211ULL + static_cast<uint64_t>(node.getId() + 1) * 31ULL;
+        gpCoordChecksum = gpCoordChecksum * 1099511628211ULL + static_cast<uint64_t>(std::lround(node.getLx())) * 37ULL;
+        gpCoordChecksum = gpCoordChecksum * 1099511628211ULL + static_cast<uint64_t>(std::lround(node.getLy())) * 41ULL;
+        gpCoordChecksum = gpCoordChecksum * 1099511628211ULL + static_cast<uint64_t>(std::lround(node.getWidth())) * 43ULL;
+        gpCoordChecksum = gpCoordChecksum * 1099511628211ULL + static_cast<uint64_t>(std::lround(node.getHeight())) * 47ULL;
+        gpOrientChecksum = gpOrientChecksum * 1099511628211ULL + static_cast<uint64_t>(node.getId() + 1) * 53ULL;
+        gpOrientChecksum = gpOrientChecksum * 1099511628211ULL + static_cast<uint64_t>(node.getOrient()) * 59ULL;
+    }
+    for (const auto& pin : pins) {
+        gpPinChecksum = gpPinChecksum * 1099511628211ULL + static_cast<uint64_t>(pin.getId() + 1) * 61ULL;
+        gpPinChecksum = gpPinChecksum * 1099511628211ULL + static_cast<uint64_t>(pin.getParNodeId() + 1) * 67ULL;
+        gpPinChecksum = gpPinChecksum * 1099511628211ULL + static_cast<uint64_t>(pin.getParNetId() + 1) * 71ULL;
+        gpPinChecksum = gpPinChecksum * 1099511628211ULL + static_cast<uint64_t>(std::lround(pin.getRelLx())) * 73ULL;
+        gpPinChecksum = gpPinChecksum * 1099511628211ULL + static_cast<uint64_t>(std::lround(pin.getRelLy())) * 79ULL;
+        gpPinChecksum = gpPinChecksum * 1099511628211ULL + static_cast<uint64_t>(std::lround(pin.getWidth())) * 83ULL;
+        gpPinChecksum = gpPinChecksum * 1099511628211ULL + static_cast<uint64_t>(std::lround(pin.getHeight())) * 89ULL;
+    }
+
+    summary["raw_cell_count"] = static_cast<uint64_t>(database.cells.size());
+    summary["raw_movable_count"] = rawMovableCount;
+    summary["raw_fixed_count"] = rawFixedCount;
+    summary["raw_block_count"] = rawBlockCount;
+    summary["raw_coord_checksum"] = rawCoordChecksum;
+    summary["raw_orient_checksum"] = rawOrientChecksum;
+    summary["gp_node_count"] = static_cast<uint64_t>(nodes.size());
+    summary["gp_movable_count"] = gpMovableCount;
+    summary["gp_pin_count"] = static_cast<uint64_t>(pins.size());
+    summary["gp_net_count"] = static_cast<uint64_t>(nets.size());
+    summary["gp_coord_checksum"] = gpCoordChecksum;
+    summary["gp_orient_checksum"] = gpOrientChecksum;
+    summary["gp_pin_checksum"] = gpPinChecksum;
+    summary["row_count"] = static_cast<uint64_t>(database.rows.size());
+    return summary;
 }
 
 void GPDatabase::writePlacement(const std::string& given_prefix) { database.save(given_prefix); }

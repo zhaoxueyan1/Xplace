@@ -258,6 +258,10 @@ public:
     void applyNodeCPos(torch::Tensor node_cpos);
     void applyNodeLPos(torch::Tensor node_lpos);
     void applyNodeLPosKeepOrient(torch::Tensor node_lpos);
+    void applyNodeLPosLikeIEDAWriteback(torch::Tensor node_lpos);
+    void applyNodeLPosLikeIEDAWriteback(torch::Tensor node_lpos, std::vector<std::pair<int, int>> row_y_orient);
+    std::vector<std::pair<int, int>> getRowYOrientPairs() const;
+    std::unordered_map<std::string, uint64_t> getPlacementSummary() const;
     std::vector<index_type> getIONets();
 
     // Write Placement

@@ -74,9 +74,16 @@ void bindGPDatabase(pybind11::module& m) {
         .def("node2pin_info_tensor", &gp::GPDatabase::getNode2PinInfoTensor, py::return_value_policy::move)
         .def("region_info_tensor", &gp::GPDatabase::getRegionInfoTensor, py::return_value_policy::move)
         .def("snet_info_tensor", &gp::GPDatabase::getSnetInfoTensor, py::return_value_policy::move)
+        .def("row_y_orient_pairs", &gp::GPDatabase::getRowYOrientPairs, py::return_value_policy::copy)
+        .def("placement_summary", &gp::GPDatabase::getPlacementSummary, py::return_value_policy::copy)
         .def("apply_node_cpos", &gp::GPDatabase::applyNodeCPos)
         .def("apply_node_lpos", &gp::GPDatabase::applyNodeLPos)
         .def("apply_node_lpos_keep_orient", &gp::GPDatabase::applyNodeLPosKeepOrient)
+        .def("apply_node_lpos_like_ieda_writeback",
+             pybind11::overload_cast<torch::Tensor>(&gp::GPDatabase::applyNodeLPosLikeIEDAWriteback))
+        .def("apply_node_lpos_like_ieda_writeback",
+             pybind11::overload_cast<torch::Tensor, std::vector<std::pair<int, int>>>(
+                 &gp::GPDatabase::applyNodeLPosLikeIEDAWriteback))
         .def("write_placement", &gp::GPDatabase::writePlacement)
         .def("get_io_nets", &gp::GPDatabase::getIONets)
         ;
