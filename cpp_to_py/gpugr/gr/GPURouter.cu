@@ -12,6 +12,14 @@ constexpr int MAX_COST = 10000000;
 #define BLOCK_SIZE 512
 #define BLOCK_NUMBER(n) (((n) + (BLOCK_SIZE) - 1) / BLOCK_SIZE)
 
+#ifndef GPUGR_USE_BATCH_OCCUPANCY_BITSET
+#define GPUGR_USE_BATCH_OCCUPANCY_BITSET 1
+#endif
+
+#ifndef GPUGR_COMPARE_BATCH_OCCUPANCY
+#define GPUGR_COMPARE_BATCH_OCCUPANCY 0
+#endif
+
 __managed__ int STAMP = 0, wireLen, viaLen;
 
 void GPURouter::initialize(int device_id, int layer, int x, int y, int N_, int cgxsize_, int cgysize_, int direction, int csrn_scale) {
@@ -664,69 +672,89 @@ void GPURouter::route(std::vector<GrNet> &nets, int iter) {
         if (std::max(X, Y) >= 2000) {
             logger.warning("Extremely large gridgraph may cause error during batch generation.");
         }
-        if (vis.size() == 0) {
+        const bool useOldOccupancy =
+            (GPUGR_USE_BATCH_OCCUPANCY_BITSET == 0) || (GPUGR_COMPARE_BATCH_OCCUPANCY != 0);
+        if (useOldOccupancy && vis.size() == 0) {
             vis.resize(2000, std::vector<short>(2000, 0));
             visLL.resize(2000, std::vector<short>(2000, 0));
             visRR.resize(2000, std::vector<short>(2000, 0));
         }
-        auto noConflict = [&] (int netId) {
+#if GPUGR_USE_BATCH_OCCUPANCY_BITSET
+        batchOccupancy.reset(2000, 2000);
+#endif
+#if !GPUGR_USE_BATCH_OCCUPANCY_BITSET || GPUGR_COMPARE_BATCH_OCCUPANCY
+        auto oldNoConflict = [&] (int netId) {
             const auto &net = nets[netId];
-            //int blockL = net.lowery / LEN, blockR = net.uppery / LEN;
-            //if(blockL == blockR) {
-                // for(int i = net.lowerx; i <= net.upperx; i++) 
-                //     for(int j = net.lowery; j <= net.uppery; j++)
-                //         if(vis[i][j]) return false;
-                for(int i = std::max(0, net.lowerx - margin); i <= net.upperx + margin; i++) 
-                    for(int j = std::max(0, net.lowery - margin); j <= net.uppery + margin; j++)
-                        if(vis[i][j]) return false;
-            /*} else {
-                for(int i = net.lowerx; i <= net.upperx; i++) {
-                    if(visLL[i][net.lowery] || visRR[i][net.uppery]) return false;
-                    for(int j = blockL + 1; j < blockR; j++)
-                        if(visLL[i][j * LEN]) return false;
-                }
-            }*/
+            const int xl = std::max(0, net.lowerx - margin);
+            const int xr = std::min(1999, net.upperx + margin);
+            const int yl = std::max(0, net.lowery - margin);
+            const int yr = std::min(1999, net.uppery + margin);
+            for(int i = xl; i <= xr; i++)
+                for(int j = yl; j <= yr; j++)
+                    if(vis[i][j]) return false;
             return true;
         };
+        auto oldSet = [&] (int netId, short value) {
+            const auto &net = nets[netId];
+            const int xl = std::max(0, net.lowerx - margin);
+            const int xr = std::min(1999, net.upperx + margin);
+            const int yl = std::max(0, net.lowery - margin);
+            const int yr = std::min(1999, net.uppery + margin);
+            for(int i = xl; i <= xr; i++)
+                for(int j = yl; j <= yr; j++)
+                    vis[i][j] = value;
+        };
+#endif
+        auto noConflict = [&] (int netId) {
+#if GPUGR_USE_BATCH_OCCUPANCY_BITSET
+            const auto &net = nets[netId];
+            const int xl = std::max(0, net.lowerx - margin);
+            const int xr = net.upperx + margin;
+            const int yl = std::max(0, net.lowery - margin);
+            const int yr = net.uppery + margin;
+            bool bitsetResult = batchOccupancy.noConflict(xl, xr, yl, yr);
+#if GPUGR_COMPARE_BATCH_OCCUPANCY
+            bool oldResult = oldNoConflict(netId);
+            if (bitsetResult != oldResult) {
+                logger.error("ERROR: batch occupancy mismatch in noConflict, net %d", netId);
+            }
+            return bitsetResult && oldResult;
+#else
+            return bitsetResult;
+#endif
+#else
+            return oldNoConflict(netId);
+#endif
+        };
         auto insert = [&] (int netId) {
-            //double t = clock();
-            const auto &net = nets[netId];           
-            int xl = std::max(0, net.lowerx - margin), xr = net.upperx + margin;
-            int yl = std::max(0, net.lowery - margin), yr = net.uppery + margin;
-            //int blockL = yl / LEN - (yl % LEN == 0), blockR = yr / LEN + (yr % LEN == 0);
-            for(int i = xl; i <= xr; i++) {
-                for(int j = yl; j <= yr; j++) {
-                    if (check_vis_correctness) {
-                        vis[i][j] += 1;
-                    } else {
-                        vis[i][j] = 1;
-                    }
-                }
-                /*for(int j = yl; j <= (blockR - 1) * LEN; j++)
-                    visLL[i][j] = 1;
-                for(int j = (blockL + 1) * LEN; j <= yr; j++)
-                    visRR[i][j] = 1;*/
-            }
-            //modify_cnt += clock() - t;
-        };        
+#if GPUGR_USE_BATCH_OCCUPANCY_BITSET
+            const auto &net = nets[netId];
+            const int xl = std::max(0, net.lowerx - margin);
+            const int xr = net.upperx + margin;
+            const int yl = std::max(0, net.lowery - margin);
+            const int yr = net.uppery + margin;
+            batchOccupancy.insert(xl, xr, yl, yr);
+#if GPUGR_COMPARE_BATCH_OCCUPANCY
+            oldSet(netId, 1);
+#endif
+#else
+            oldSet(netId, 1);
+#endif
+        };
         auto remove = [&] (int netId) {
-            const auto &net = nets[netId];           
-            int xl = std::max(0, net.lowerx - margin), xr = net.upperx + margin;
-            int yl = std::max(0, net.lowery - margin), yr = net.uppery + margin;
-            //int blockL = yl / LEN - (yl % LEN == 0), blockR = yr / LEN + (yr % LEN == 0);
-            for(int i = xl; i <= xr; i++) {
-                for(int j = yl; j <= yr; j++) {
-                    if (check_vis_correctness) {
-                        vis[i][j] -= 1;
-                    } else {
-                        vis[i][j] = 0;
-                    }
-                }
-                /*for(int j = yl; j <= (blockR - 1) * LEN; j++)
-                    visLL[i][j] = 0;
-                for(int j = (blockL + 1) * LEN; j <= yr; j++)
-                    visRR[i][j] = 0;*/
-            }
+#if GPUGR_USE_BATCH_OCCUPANCY_BITSET
+            const auto &net = nets[netId];
+            const int xl = std::max(0, net.lowerx - margin);
+            const int xr = net.upperx + margin;
+            const int yl = std::max(0, net.lowery - margin);
+            const int yr = net.uppery + margin;
+            batchOccupancy.remove(xl, xr, yl, yr);
+#if GPUGR_COMPARE_BATCH_OCCUPANCY
+            oldSet(netId, 0);
+#endif
+#else
+            oldSet(netId, 0);
+#endif
         };
         auto checkVis = [&] () {
             for (int i = 0; i < 2000; i++) {

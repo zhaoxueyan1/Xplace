@@ -2,6 +2,7 @@
 #include "MazeRoute.h"
 #include "PatternRoute.h"
 #include "common/common.h"
+#include "gpugr/gr/BatchOccupancy.h"
 #include <torch/extension.h>
 #include "gpugr/db/GrNet.h"
 
@@ -115,6 +116,7 @@ private:
     const int MAX_BATCH_SIZE = 100, MAX_PIN_SIZE_PER_NET = 500000;
 
     std::vector<std::vector<short>> vis, visLL, visRR;
+    BatchOccupancy batchOccupancy;
 };
 
 }  // namespace gr
