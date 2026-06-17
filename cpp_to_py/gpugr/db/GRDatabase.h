@@ -2,6 +2,7 @@
 #include "GrNet.h"
 #include "common/common.h"
 #include "GRSetting.h"
+#include <string>
 
 namespace db {
 class Database;
@@ -34,6 +35,12 @@ public:
 
 class GRDatabase {
 public:
+    struct SetupProfileRecord {
+        std::string name;
+        double elapsedMs = 0.0;
+        std::vector<std::pair<std::string, long long>> fields;
+    };
+
     db::Database& rawdb;
     gp::GPDatabase& gpdb;
 
@@ -77,6 +84,7 @@ public:
 
     std::vector<GrNet> grNets;
     std::vector<int> gpdbPinId2gbPinId;
+    std::vector<SetupProfileRecord> setupProfileRecords;
 
     GRDatabase(std::shared_ptr<db::Database> rawdb_, std::shared_ptr<gp::GPDatabase> gpdb_);
     ~GRDatabase();
@@ -89,6 +97,11 @@ public:
     void addMovObs();
     void updateUsageLength();
     void setupObs();
+    const std::vector<SetupProfileRecord>& getSetupProfileRecords() const { return setupProfileRecords; }
+    void clearSetupProfileRecords() { setupProfileRecords.clear(); }
+    void appendSetupProfileRecord(std::string name,
+                                  double elapsedMs,
+                                  std::vector<std::pair<std::string, long long>> fields = {});
 
     void setupGrNets();
     void resetGrNetsRoute();

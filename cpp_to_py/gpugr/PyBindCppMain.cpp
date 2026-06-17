@@ -40,6 +40,20 @@ struct PackedTopologyRecord {
     bool route_failed = false;
 };
 
+pybind11::list buildGRDatabaseSetupProfile(const gr::GRDatabase& grdb) {
+    pybind11::list records;
+    for (const auto& record : grdb.getSetupProfileRecords()) {
+        pybind11::dict item;
+        item["name"] = record.name;
+        item["elapsed_ms"] = record.elapsedMs;
+        for (const auto& field : record.fields) {
+            item[pybind11::str(field.first)] = field.second;
+        }
+        records.append(item);
+    }
+    return records;
+}
+
 std::tuple<int, int, int> decodeRoutePoint(const gr::GRDatabase& grdb, int p) {
     int l = p / grdb.nMaxGrid / grdb.nMaxGrid;
     int x = p % (grdb.nMaxGrid * grdb.nMaxGrid) / grdb.nMaxGrid;
@@ -959,6 +973,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def(pybind11::init<std::shared_ptr<db::Database>, std::shared_ptr<gp::GPDatabase>>())
         .def("report_gr_stat", &gr::GRDatabase::reportGRStat)
         .def("grnet_summary", [](gr::GRDatabase& grdb) { return buildGRNetSummary(grdb); })
+        .def("setup_profile", [](const gr::GRDatabase& grdb) { return buildGRDatabaseSetupProfile(grdb); })
         .def("setup_capacity", &gr::GRDatabase::setupCapacity)
         .def("setup_wiredist", &gr::GRDatabase::setupWireDist)
         .def("setup_obs", &gr::GRDatabase::setupObs)

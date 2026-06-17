@@ -15,8 +15,21 @@ namespace gr {
 
 GRDatabase::~GRDatabase() { logger.info("destruct grdb"); }
 
+void GRDatabase::appendSetupProfileRecord(std::string name,
+                                          double elapsedMs,
+                                          std::vector<std::pair<std::string, long long>> fields) {
+    setupProfileRecords.push_back({std::move(name), elapsedMs, std::move(fields)});
+}
+
 GRDatabase::GRDatabase(std::shared_ptr<db::Database> rawdb_, std::shared_ptr<gp::GPDatabase> gpdb_)
     : rawdb(*rawdb_), gpdb(*gpdb_) {
+    auto profilePhase = [&](const std::string& name, auto&& func) {
+        utils::timer T;
+        T.start();
+        func();
+        appendSetupProfileRecord(name, T.elapsed() * 1000.0);
+    };
+
     logger.info("Init GRDatabase.");
     ISPD18 = (db::setting.LefFile.find("ispd18") != std::string::npos);
     ISPD19 = (db::setting.LefFile.find("ispd19") != std::string::npos);
@@ -164,12 +177,39 @@ GRDatabase::GRDatabase(std::shared_ptr<db::Database> rawdb_, std::shared_ptr<gp:
                 nMaxGrid);
 
     // 3) init routing capacity and routing wire distance
-    setupCapacity();
-    setupWireDist();
+    profilePhase("setupCapacity", [&]() { setupCapacity(); });
+    if (!setupProfileRecords.empty()) {
+        setupProfileRecords.back().fields.emplace_back("grid_graph_size", static_cast<long long>(gridGraphSize));
+        setupProfileRecords.back().fields.emplace_back("layer_count", static_cast<long long>(nLayers));
+    }
+    profilePhase("setupWireDist", [&]() { setupWireDist(); });
+    if (!setupProfileRecords.empty()) {
+        setupProfileRecords.back().fields.emplace_back("grid_graph_size", static_cast<long long>(gridGraphSize));
+        setupProfileRecords.back().fields.emplace_back("layer_count", static_cast<long long>(nLayers));
+    }
     // 4) init obs and mark obs
-    setupObs();
+    profilePhase("addFixObs", [&]() { addFixObs(); });
+    if (!setupProfileRecords.empty()) {
+        setupProfileRecords.back().fields.emplace_back("fixed_obs", static_cast<long long>(fixObs.size()));
+    }
+    profilePhase("addMovObs", [&]() { addMovObs(); });
+    if (!setupProfileRecords.empty()) {
+        setupProfileRecords.back().fields.emplace_back("movable_obs", static_cast<long long>(movObs.size()));
+    }
+    profilePhase("updateUsageLength", [&]() { updateUsageLength(); });
+    if (!setupProfileRecords.empty()) {
+        setupProfileRecords.back().fields.emplace_back("grid_graph_size", static_cast<long long>(gridGraphSize));
+    }
     // 5) init gr nets
-    setupGrNets();
+    profilePhase("setupGrNets", [&]() { setupGrNets(); });
+    if (!setupProfileRecords.empty()) {
+        long long gbPinCount = 0;
+        for (auto& grNet : grNets) {
+            gbPinCount += static_cast<long long>(grNet.getPins().size());
+        }
+        setupProfileRecords.back().fields.emplace_back("net_count", static_cast<long long>(grNets.size()));
+        setupProfileRecords.back().fields.emplace_back("gb_pin_count", gbPinCount);
+    }
     logger.info("Finish setting up grdb");
 }
 
