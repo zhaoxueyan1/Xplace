@@ -10,6 +10,32 @@ matplotlib_logger = logging.getLogger("matplotlib")
 matplotlib_logger.setLevel(logging.INFO)
 
 
+def save_initial_density_map(init_density_map, args, tag="initial"):
+    res_root = os.path.join(args.result_dir, args.exp_id)
+    output_dir = os.path.join(res_root, args.eval_dir)
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+
+    design_name = getattr(args, "design_name", "design")
+    stem = "%s_%s_density_map" % (design_name, tag)
+    png_path = os.path.join(output_dir, stem + ".png")
+    npy_path = os.path.join(output_dir, stem + ".npy")
+
+    density_np = init_density_map.detach().cpu().numpy()
+    np.save(npy_path, density_np)
+
+    fig, ax = plt.subplots(figsize=(12, 10))
+    im = ax.imshow(density_np.T, origin="lower", cmap="YlGnBu", interpolation="nearest")
+    fig.colorbar(im, ax=ax)
+    ax.set_title("Initial Density Map")
+    ax.set_xlabel("bin x")
+    ax.set_ylabel("bin y")
+    fig.tight_layout()
+    fig.savefig(png_path, bbox_inches="tight")
+    plt.close(fig)
+    return {"png": png_path, "npy": npy_path}
+
+
 def draw_fig_with_cairo(
     mov_node_pos,
     mov_node_size,

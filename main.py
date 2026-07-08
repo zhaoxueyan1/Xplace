@@ -82,6 +82,7 @@ def get_option():
 
     # placement output
     parser.add_argument('--draw_placement', type=str2bool, default=False, help='draw placement') 
+    parser.add_argument('--plot_initial_density_map', type=str2bool, default=False, help='plot initial density map after construction') 
     parser.add_argument('--write_placement', type=str2bool, default=True, help='write placement result') 
     parser.add_argument('--write_global_placement', type=str2bool, default=False, help='write global placement result') 
     parser.add_argument('--output_dir', type=str, default="output", help='output directory') 
