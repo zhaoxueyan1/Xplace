@@ -893,6 +893,27 @@ void GRDatabase::setupGrNets() {
             for (size_t pinIdx = 0; pinIdx < pinAccessPoints.size(); pinIdx++) {
                 db::Pin* net_pin = rawdbNet->pins[pinIdx];
                 const auto& accessPoints = pinAccessPoints[pinIdx];
+                if (accessPoints.empty()) {
+                    std::string instName = "";
+                    std::string instType = "";
+                    if (net_pin->iopin != nullptr) {
+                        instName = net_pin->iopin->name;
+                        instType = net_pin->iopin->type->name();
+                    } else if (net_pin->cell != nullptr) {
+                        instName = net_pin->cell->name();
+                        instType = net_pin->cell->ctype()->name;
+                    }
+                    logger.warning(
+                        "Skip GR pin without access points: netId: %d netName: %s netPinId: %zu | "
+                        "instName: %s instType: %s pinName: %s",
+                        netId,
+                        rawdbNet->name.c_str(),
+                        pinIdx,
+                        instName.c_str(),
+                        instType.c_str(),
+                        net_pin->type->name().c_str());
+                    continue;
+                }
                 int minDistance = std::numeric_limits<int>::max();
                 int bestIndex = -1;
                 for (int index = 0; index < accessPoints.size(); index++) {
@@ -935,10 +956,13 @@ void GRDatabase::setupGrNets() {
                 grPin2GpdbPins[grNetPinId] = std::move(accessPoint2pinIds[hash]);
                 grNetPinId++;
             }
+            if (grNetPins.empty()) {
+                xmin = ymin = xmax = ymax = 0;
+            }
             grNets[netId].setBoundingBox(xmin, ymin, xmax, ymax);
             grNets[netId].setPins(grNetPins);
             grNets[netId].pin2gpdbPinIds = std::move(grPin2GpdbPins);
-            if (!grNets[netId].needToRoute()) {
+            if (grNetPins.size() < 2 || !grNets[netId].needToRoute()) {
                 grNets[netId].setNoRoute();
                 // } else if (ymax - ymin <= 2 && xmax - xmin <= 2 && lmax - lmin <= 3) {
                 //     grNets[netId].setNoRoute(), tempcnt++;
