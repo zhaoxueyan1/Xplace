@@ -3,7 +3,7 @@
 .vscode/
 __pycache__/
 *.so
-build/
+build*/
 build_cpu_pr/
 *.log
 *.npy

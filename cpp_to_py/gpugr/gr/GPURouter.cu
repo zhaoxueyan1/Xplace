@@ -4,7 +4,8 @@
 
 namespace gr {
 
-constexpr int MAX_ROUTE_LEN_PER_PIN = 130;   // too large may exceed the maximum GPU memory
+// Keep headroom for long final-routing paths; this directly scales route-buffer GPU memory.
+constexpr int MAX_ROUTE_LEN_PER_PIN = 160;
 
 constexpr int INF = 10000000;
 constexpr int MAX_COST = 10000000;

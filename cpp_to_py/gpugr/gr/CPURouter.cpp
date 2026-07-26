@@ -15,7 +15,8 @@ constexpr int INF = 10000000;
 constexpr int PR_INT_INF = 1000000000;
 constexpr int MAX_COST = 10000000;
 constexpr int64_t PR_INF = (1LL << 60);
-constexpr int MAX_ROUTE_LEN_PER_PIN = 130;
+// Match the CUDA route-buffer capacity when constructing route-offset identities.
+constexpr int MAX_ROUTE_LEN_PER_PIN = 160;
 
 inline int boundedExp2(float x) {
     int shift = static_cast<int>(x);
