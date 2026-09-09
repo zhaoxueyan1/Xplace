@@ -619,6 +619,7 @@ __global__ void cudaPatternRouteParallel(int64_t *map,
                                          int *wires,
                                          int *vias,
                                          int *routes,
+                                         const int64_t *routeOffsets,
                                          int *gbpoints,
                                          int *gbpinRoutes,
                                          int LAYER,
@@ -627,7 +628,7 @@ __global__ void cudaPatternRouteParallel(int64_t *map,
     // printf("%d offset %d\n", threadIdx.x, points[threadIdx.x]);
     gbpoints += gbpoints[blockIdx.x];
     points += points[blockIdx.x];
-    routes += points[0];
+    routes += routeOffsets[blockIdx.x];
     if (threadIdx.x == 0) routes[0] = 1;
     __syncthreads();
     int node_cnt = points[1];
@@ -1202,6 +1203,7 @@ void patternRoute(int *points,
                   int *wires,
                   int *vias,
                   int *routes,
+                  int64_t *batchRouteOffsets,
                   int *gbpoints,
                   int *gbpinRoutes,
                   int X,
@@ -1222,7 +1224,7 @@ void patternRoute(int *points,
     // }
     cudaPatternRouteParallel<<<batchSize, 32>>>(
         map, points, wireCostSum, viaCost, prev, prev + 10 * LAYER * N * N, 
-        wires, vias, routes, gbpoints, gbpinRoutes, LAYER, N, DIRECTION);
+        wires, vias, routes, batchRouteOffsets, gbpoints, gbpinRoutes, LAYER, N, DIRECTION);
 
     // cudaPatternRoute<<<batchSize, LAYER>>> (map, points, wireCostSum, viaCost, prev, wires, vias, routes, LAYER, N,
     // DIRECTION);

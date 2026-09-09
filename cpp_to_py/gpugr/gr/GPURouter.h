@@ -3,6 +3,7 @@
 #include "PatternRoute.h"
 #include "common/common.h"
 #include "gpugr/gr/BatchOccupancy.h"
+#include <cstdint>
 #include <torch/extension.h>
 #include "gpugr/db/GrNet.h"
 
@@ -93,7 +94,8 @@ private:
     int cgxsize, cgysize;
 
     int *pinNum = nullptr, *pinNumOffset = nullptr, *pins = nullptr;
-    int *routes = nullptr, *routesOffset = nullptr, *routesOffsetCPU = nullptr, *pinNumCPU = nullptr;
+    int *routes = nullptr, *pinNumCPU = nullptr;
+    int64_t *routesOffset = nullptr, *routesOffsetCPU = nullptr, *batchRouteOffsets = nullptr;
     int *allpins;
     int *points = nullptr, *gbpoints = nullptr;
     int *gbpinRoutes = nullptr, *gbpin2netId = nullptr, *plPinId2gbPinId = nullptr;

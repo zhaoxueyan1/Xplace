@@ -97,7 +97,7 @@ __global__ void compGcellRouteForce(
     torch::PackedTensorAccessor32<float, 1, torch::RestrictPtrTraits> wirelength_weights,
     torch::PackedTensorAccessor32<float, 3, torch::RestrictPtrTraits> route_gradmat,
     float grad_weight, float unit_wire_cost, float unit_via_cost,
-    int *gbpinRoutes, int *gbpin2netId, int *routes, int *routesOffset,
+    int *gbpinRoutes, int *gbpin2netId, int *routes, int64_t *routesOffset,
     int numGbPin, int N, int LAYER, int xSize, int ySize, int DIRECTION
 ) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
