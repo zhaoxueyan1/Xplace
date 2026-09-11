@@ -46,5 +46,7 @@ void patternRoute(int *points,
                   int Y,
                   int N,
                   int LAYER,
-                  int DIRECTION);
+                  int DIRECTION,
+                  int routingLayerBegin,
+                  int routingLayerEnd);
 }  // namespace gr

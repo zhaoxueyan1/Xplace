@@ -40,6 +40,9 @@ void GRSetting::reset() {
     routeYSize = 0;
     csrnScale = 0;
 
+    bottomRoutingLayer = "";
+    topRoutingLayer = "";
+
     rrrIters = 0;
     backend = GGRBackend::AUTO;
     resolvedBackend = GGRBackend::AUTO;

@@ -11,7 +11,7 @@ extern const int MAX_LAYER_NUM, MAX_PIN_NUM;
 
 class GPUMazeRouter {
 public:
-    void startGPU(int device_id, int layer, int x, int y);
+    void startGPU(int device_id, int layer, int x, int y, int routing_layer_begin = 0, int routing_layer_end = -1);
     void endGPU();
     void query();
     void run(int DIRECTION, int iterleft);
@@ -36,6 +36,7 @@ public:
 
     int MAX_TURN_NUM = 10;
     int LAYER, X, Y, NX, NY; // 0: x-1,x,x+1...  1: y-1,y,y+1...
+    int routingLayerBegin = 0, routingLayerEnd = -1;
     int *costMap, *viaMap, *markMap, *cudaRoutedPin;
 
     int *cost, *via, *costL, *costR, *cudaMap, *reset;

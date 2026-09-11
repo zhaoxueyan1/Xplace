@@ -942,6 +942,14 @@ bool loadGRParams(const pybind11::dict& kwargs) {
         gr::grSetting.csrnScale = kwargs["csrn_scale"].cast<int>();
     }
 
+    if (kwargs.contains("bottom_routing_layer")) {
+        gr::grSetting.bottomRoutingLayer = kwargs["bottom_routing_layer"].cast<std::string>();
+    }
+
+    if (kwargs.contains("top_routing_layer")) {
+        gr::grSetting.topRoutingLayer = kwargs["top_routing_layer"].cast<std::string>();
+    }
+
     if (kwargs.contains("rrrIters")) {
         gr::grSetting.rrrIters = kwargs["rrrIters"].cast<int>();
     }
@@ -977,7 +985,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def("setup_capacity", &gr::GRDatabase::setupCapacity)
         .def("setup_wiredist", &gr::GRDatabase::setupWireDist)
         .def("setup_obs", &gr::GRDatabase::setupObs)
-        .def("setup_grnets", &gr::GRDatabase::setupGrNets);
+        .def("setup_grnets", &gr::GRDatabase::setupGrNets)
+        .def("routing_layer_range", &gr::GRDatabase::routingLayerRange)
+        .def("routing_layer_names", &gr::GRDatabase::routingLayerNames);
     pybind11::class_<gr::RouteForce, std::shared_ptr<gr::RouteForce>>(m, "RouteForce")
         .def(pybind11::init<std::shared_ptr<gr::GRDatabase>>())
         .def("run_ggr", &gr::RouteForce::run_ggr)
@@ -986,6 +996,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def("microns", &gr::RouteForce::getMicrons)
         .def("layer_pitch", &gr::RouteForce::getLayerPitch)
         .def("layer_width", &gr::RouteForce::getLayerWidth)
+        .def("routing_layer_range", &gr::RouteForce::getRoutingLayerRange)
+        .def("routing_layer_names", &gr::RouteForce::getRoutingLayerNames)
         .def("raw_routes", &gr::RouteForce::getRawRoutes, py::return_value_policy::move)
         .def("route_entries", [](gr::RouteForce& routeforce) { return buildRouteEntries(routeforce); })
         .def(

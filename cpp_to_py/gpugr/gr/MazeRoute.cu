@@ -13,17 +13,21 @@ __global__ void Init(int *map, int *prev) {
     map[blockIdx.x * blockDim.x + threadIdx.x] = INF;
     prev[blockIdx.x * blockDim.x + threadIdx.x] = blockIdx.x * blockDim.x + threadIdx.x;
 }
-__global__ void MinAll(int *x, int *y, int *prev, int LAYER, int X, int Y) {
+__global__ void MinAll(int *x, int *y, int *prev, int LAYER, int X, int Y, int routingLayerBegin, int routingLayerEnd) {
     int delta = X * Y, idx = blockIdx.x * Y + threadIdx.x, p[10];
-    for (int i = 0; i < LAYER; i++) p[i] = i;
-    for (int i = 1; i < LAYER; i++) {
+    const int firstLayer = max(1, routingLayerBegin);
+    const int lastLayer = min(LAYER - 1, routingLayerEnd);
+    if (firstLayer > lastLayer) return;
+    for (int i = firstLayer; i <= lastLayer; i++) p[i] = i;
+    for (int i = firstLayer + 1; i <= lastLayer; i++) {
         if (x[idx + delta * i] > x[idx + delta * (i - 1)] + y[idx + delta * (i - 1)])
             x[idx + delta * i] = x[idx + delta * (i - 1)] + y[idx + delta * (i - 1)], p[i] = p[i - 1];
-        if (x[idx + (LAYER - 1 - i) * delta] > x[idx + (LAYER - i) * delta] + y[idx + (LAYER - 1 - i) * delta])
-            x[idx + (LAYER - 1 - i) * delta] = x[idx + (LAYER - i) * delta] + y[idx + (LAYER - 1 - i) * delta],
-                                      p[LAYER - 1 - i] = p[LAYER - i];
     }
-    for (int i = 0; i < LAYER; i++)
+    for (int i = lastLayer - 1; i >= firstLayer; i--) {
+        if (x[idx + delta * i] > x[idx + delta * (i + 1)] + y[idx + delta * i])
+            x[idx + delta * i] = x[idx + delta * (i + 1)] + y[idx + delta * i], p[i] = p[i + 1];
+    }
+    for (int i = firstLayer; i <= lastLayer; i++)
         if (p[i] != i) prev[idx + i * delta] = idx + p[i] * delta;
 }
 
@@ -604,7 +608,9 @@ __global__ void routeFG(int64_t *costSum,
                         int X,
                         int Y,
                         int N,
-                        int DIRECTION) {
+                        int DIRECTION,
+                        int routingLayerBegin,
+                        int routingLayerEnd) {
     extern __shared__ int shared[];
     int *localDist = shared, *localPrev = localDist + LAYER * SCALE * SCALE,
         *localWireCost = localPrev + LAYER * SCALE * SCALE, *localViaCost = localWireCost + LAYER * SCALE * SCALE;
@@ -614,7 +620,9 @@ __global__ void routeFG(int64_t *costSum,
     for (int i = mark[0]; i >= 4; i--) {
         int layer = mark[i] / X / Y, x = mark[i] / Y % X, y = mark[i] % Y;
         if (i == mark[0] || i == 4) {
-            int lower = max(layer - 9, 0), upper = min(LAYER - 1, layer + 9), minx = x * SCALE, miny = y * SCALE;
+            const int firstLayer = max(1, routingLayerBegin);
+            const int lastLayer = min(LAYER - 1, routingLayerEnd);
+            int lower = max(layer - 9, firstLayer), upper = min(lastLayer, layer + 9), minx = x * SCALE, miny = y * SCALE;
             int local_x = threadIdx.x / SCALE, local_y = threadIdx.x % SCALE, global_x = minx + local_x,
                 global_y = miny + local_y;
             for (int l = lower; l <= upper; l++)
@@ -697,7 +705,10 @@ __global__ void routeFG(int64_t *costSum,
         if (i > 4) {
             int _layer = mark[i - 1] / X / Y, _x = mark[i - 1] / Y % X, _y = mark[i - 1] % Y;
             if (_layer != layer) {
-                int lower = max(min(layer, _layer) - 9, 0), upper = min(LAYER - 1, max(layer, _layer) + 9),
+                const int firstLayer = max(1, routingLayerBegin);
+                const int lastLayer = min(LAYER - 1, routingLayerEnd);
+                int lower = max(min(layer, _layer) - 9, firstLayer),
+                    upper = min(lastLayer, max(layer, _layer) + 9),
                     minx = x * SCALE, miny = y * SCALE;
                 int local_x = threadIdx.x / SCALE, local_y = threadIdx.x % SCALE, global_x = minx + local_x,
                     global_y = miny + local_y;
@@ -872,7 +883,9 @@ void GPUMazeRouter::query() { printf("avg min max: %d %d %d\n", sumLen / sumCnt,
 void GPUMazeRouter::run(int DIRECTION, int iterleft) {
     auto startTime = clock();
     MAX_TURN_NUM = 5;
-    for (int i = 1; i < LAYER; i++)
+    const int firstLayer = std::max(1, routingLayerBegin);
+    const int lastLayer = std::min(LAYER - 1, routingLayerEnd);
+    for (int i = firstLayer; i <= lastLayer; i++)
         if ((i & 1) ^ DIRECTION) {
             SumL<<<X, Y, Y * sizeof(int)>>>(cost + i * X * Y, costL + i * X * Y, X, Y);
             SumR<<<X, Y, Y * sizeof(int)>>>(cost + i * X * Y, costR + i * X * Y, X, Y);
@@ -939,7 +952,7 @@ void GPUMazeRouter::getResults(double &time_cnt, int64_t *costSum, int *pins, in
                         if(iter)
                             setInfinity.succeed(fgroute[iter - 1]);
                         for(int turn = 0; turn < MAX_TURN_NUM; turn++) {
-                            minall[iter * MAX_TURN_NUM + turn] = flow[i * LOG + d].kernel(X, Y, 0, MinAll, map + i * LAYER * X * Y, via, prev + i * LAYER * X * Y, LAYER, X, Y).name("minall");
+                            minall[iter * MAX_TURN_NUM + turn] = flow[i * LOG + d].kernel(X, Y, 0, MinAll, map + i * LAYER * X * Y, via, prev + i * LAYER * X * Y, LAYER, X, Y, routingLayerBegin, routingLayerEnd).name("minall");
                             if(turn)
                                 minall[iter * MAX_TURN_NUM + turn].succeed(sweeplr[iter * MAX_TURN_NUM + turn - 1]).succeed(sweepud[iter * MAX_TURN_NUM + turn - 1]);
                             //else if(iter)                            
@@ -950,7 +963,7 @@ void GPUMazeRouter::getResults(double &time_cnt, int64_t *costSum, int *pins, in
                             sweepud[iter * MAX_TURN_NUM + turn] = flow[i * LOG + d].kernel(blockUD, (X + 1) / 2, 4 * X * sizeof(int), sweepUD, costL, costR, map + i * LAYER * X * Y, prev + i * LAYER * X * Y, 1 + (DIRECTION == 0), X, Y).succeed(minall[iter * MAX_TURN_NUM + turn]);
                         }        
                         path[iter] = flow[i * LOG + d].kernel(1, 1, 0, Path, map + i * LAYER * X * Y, pins + i * MAX_PIN_SIZE_PER_NET + 1, routedPin + i * MAX_PIN_NUM, prev + i * LAYER * X * Y, mark + i * MAX_PIN_NUM * 10, LAYER, X, Y, N, DIRECTION, SCALE).name("path" + std::to_string(d)).succeed(sweeplr[(iter + 1) * MAX_TURN_NUM - 1]).succeed(sweepud[(iter + 1) * MAX_TURN_NUM - 1]);
-                        fgroute[iter] = flow[i * LOG + d].kernel(1, SCALE * SCALE, 4 * LAYER * SCALE * SCALE * sizeof(int), routeFG, costSum, pins + i * MAX_PIN_SIZE_PER_NET + 1, mark + i * MAX_PIN_NUM * 10, dist + i * LAYER * N * N, fgprev + i * LAYER * N * N, wireCost, viaCost, wires, vias, routes, LAYER, SCALE, X, Y, N, DIRECTION).name("fgroute" + std::to_string(d)).succeed(path[iter]);
+                        fgroute[iter] = flow[i * LOG + d].kernel(1, SCALE * SCALE, 4 * LAYER * SCALE * SCALE * sizeof(int), routeFG, costSum, pins + i * MAX_PIN_SIZE_PER_NET + 1, mark + i * MAX_PIN_NUM * 10, dist + i * LAYER * N * N, fgprev + i * LAYER * N * N, wireCost, viaCost, wires, vias, routes, LAYER, SCALE, X, Y, N, DIRECTION, routingLayerBegin, routingLayerEnd).name("fgroute" + std::to_string(d)).succeed(path[iter]);
                     }
                     flow[i * LOG + d].instantiate();
                 }
@@ -1002,12 +1015,12 @@ void GPUMazeRouter::getResults(double &time_cnt, int64_t *costSum, int *pins, in
                 setInf<<<LAYER * X, Y, 0, streams[net]>>> (map, prev);
 
                 for(int turn = MAX_TURN_NUM; turn >= 1; turn--) {
-                    MinAll<<<X, Y, 0, streams[net]>>> (map, via, prev, LAYER, X, Y);
+                    MinAll<<<X, Y, 0, streams[net]>>> (map, via, prev, LAYER, X, Y, routingLayerBegin, routingLayerEnd);
                     sweepLR<<<blockLR, Y, 4 * Y * sizeof(int), streams[net]>>> (costL, costR, map, prev, 1 + (DIRECTION == 1), X, Y);
                     sweepUD<<<blockUD, X, 4 * X * sizeof(int), streams[net]>>> (costL, costR, map, prev, 1 + (DIRECTION == 0), X, Y);
                 }
                 Path<<<1, 1, 0, streams[net]>>> (map, pins + 1, routedPin, prev, mark, LAYER, X, Y, N, DIRECTION, SCALE);
-                routeFG<<<1, SCALE * SCALE, 4 * LAYER * SCALE * SCALE * sizeof(int), streams[net]>>> (costSum, pins + 1, mark, dist, fgprev, wireCost, viaCost, wires, vias, routes, LAYER, SCALE, X, Y, N, DIRECTION);
+                routeFG<<<1, SCALE * SCALE, 4 * LAYER * SCALE * SCALE * sizeof(int), streams[net]>>> (costSum, pins + 1, mark, dist, fgprev, wireCost, viaCost, wires, vias, routes, LAYER, SCALE, X, Y, N, DIRECTION, routingLayerBegin, routingLayerEnd);
             }
             time_cnt += clock() - t;
             //cudaDeviceSynchronize();
@@ -1026,9 +1039,11 @@ void GPUMazeRouter::getResults(double &time_cnt, int64_t *costSum, int *pins, in
     { cudaDeviceSynchronize(); int errorType = cudaGetLastError(); if(errorType) { std::cerr << "run.2 CUDA ERROR: " << errorType  << std::endl; exit(0); }}
 }
 
-void GPUMazeRouter::startGPU(int device_id, int layer, int x, int y) {
+void GPUMazeRouter::startGPU(int device_id, int layer, int x, int y, int routing_layer_begin, int routing_layer_end) {
     cudaSetDevice(device_id);
     LAYER = layer;
+    routingLayerBegin = routing_layer_begin;
+    routingLayerEnd = routing_layer_end < 0 ? layer - 1 : routing_layer_end;
     X = x;
     Y = y;
     NX = NY = 1;

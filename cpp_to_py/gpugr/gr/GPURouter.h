@@ -15,13 +15,43 @@ class GPURouter {
 public:
     GPURouter(){};
     GPURouter(
-        int device_id, int layer, int x, int y, int N_, int cgxsize_, int cgysize_, int direction, int csrn_scale) {
-        initialize(device_id, layer, x, y, N_, cgxsize_, cgysize_, direction, csrn_scale);
+        int device_id,
+        int layer,
+        int x,
+        int y,
+        int N_,
+        int cgxsize_,
+        int cgysize_,
+        int direction,
+        int csrn_scale,
+        int routing_layer_begin = 0,
+        int routing_layer_end = -1) {
+        initialize(device_id,
+                   layer,
+                   x,
+                   y,
+                   N_,
+                   cgxsize_,
+                   cgysize_,
+                   direction,
+                   csrn_scale,
+                   routing_layer_begin,
+                   routing_layer_end);
     }
     ~GPURouter();
 
     void initialize(
-        int device_id, int layer, int x, int y, int N_, int cgxsize_, int cgysize_, int direction, int csrn_scale);
+        int device_id,
+        int layer,
+        int x,
+        int y,
+        int N_,
+        int cgxsize_,
+        int cgysize_,
+        int direction,
+        int csrn_scale,
+        int routing_layer_begin = 0,
+        int routing_layer_end = -1);
 
     void setMap(const std::vector<float> &cap,
                 const std::vector<float> &wir,
@@ -90,6 +120,7 @@ private:
 
     int DEVICE_ID;
     int LAYER, N, X, Y, NET_NUM, DIRECTION;
+    int routingLayerBegin = 0, routingLayerEnd = -1;
     int COARSENING_SCALE;
     int cgxsize, cgysize;
 

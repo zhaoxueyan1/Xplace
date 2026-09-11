@@ -23,6 +23,10 @@ Please refer to `cpp_to_py/gpugr/PyBindCppMain.cpp`.
 - `rrrIters`: The number of rip-up and re-route iterations (maze route). If `rrrIters = 0`, perform the pattern route only.
 - `csrn_scale`: The size of coarsen grid in maze routing.
 - `route_guide`: The file name of output route guide.
+- `bottom_routing_layer` / `top_routing_layer`: Optional inclusive routing-layer
+  names resolved against the LEF `TYPE ROUTING` stack. Empty values use the
+  first/last routing layer. Planar edges and vias outside this interval are
+  unavailable to both pattern and maze routing.
 
 ## Citation
 If you find **GGR** useful in your research, please consider to cite:
@@ -85,9 +89,12 @@ gpugr.load_gr_params(
         "route_ySize": 0,
         "rrrIters": 1,
         "route_guide": route_guide_file,
+        "bottom_routing_layer": "MET2",
+        "top_routing_layer": "MET5",
     }
 )
 grdb = gpugr.create_grdatabase(rawdb, gpdb)
+print("GPUGR layer range:", grdb.routing_layer_range(), grdb.routing_layer_names())
 routeforce = gpugr.create_routeforce(grdb)
 routeforce.run_ggr()
 end_gr_time = time.time()

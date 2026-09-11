@@ -11,9 +11,60 @@
 #include "common/db/Via.h"
 #include "io_parser/gp/GPDatabase.h"
 
+#include <cctype>
+#include <sstream>
+#include <stdexcept>
+
 namespace gr {
 
+namespace {
+
+std::string normalizeRoutingLayerName(std::string value) {
+    const auto first = value.find_first_not_of(" \t\r\n");
+    if (first == std::string::npos) return "";
+    const auto last = value.find_last_not_of(" \t\r\n");
+    value = value.substr(first, last - first + 1);
+    for (char& c : value) {
+        c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+    }
+    return value;
+}
+
+std::string availableRoutingLayers(db::Database& rawdb) {
+    std::ostringstream names;
+    for (int layer = 0; layer < static_cast<int>(rawdb.getNumRLayers()); ++layer) {
+        if (layer != 0) names << ", ";
+        names << rawdb.getRLayer(layer)->name();
+    }
+    return names.str();
+}
+
+int resolveRoutingLayer(db::Database& rawdb,
+                        const std::string& requested,
+                        int fallback,
+                        const char* boundName) {
+    const std::string normalized = normalizeRoutingLayerName(requested);
+    if (normalized.empty()) return fallback;
+    for (int layer = 0; layer < static_cast<int>(rawdb.getNumRLayers()); ++layer) {
+        if (normalizeRoutingLayerName(rawdb.getRLayer(layer)->name()) == normalized) return layer;
+    }
+    throw std::runtime_error(
+        "Unknown GPUGR " + std::string(boundName) + " routing layer '" + requested
+        + "'. Available routing layers: " + availableRoutingLayers(rawdb));
+}
+
+}  // namespace
+
 GRDatabase::~GRDatabase() { logger.info("destruct grdb"); }
+
+std::vector<std::string> GRDatabase::routingLayerNames() const {
+    std::vector<std::string> names;
+    names.reserve(static_cast<size_t>(nLayers));
+    for (int layer = 0; layer < nLayers; ++layer) {
+        names.emplace_back(rawdb.getRLayer(layer)->name());
+    }
+    return names;
+}
 
 void GRDatabase::appendSetupProfileRecord(std::string name,
                                           double elapsedMs,
@@ -50,6 +101,21 @@ GRDatabase::GRDatabase(std::shared_ptr<db::Database> rawdb_, std::shared_ptr<gp:
 
     // 1) init layers and tracks
     nLayers = rawdb.getNumRLayers();
+    if (nLayers <= 0) {
+        throw std::runtime_error("GPUGR requires at least one TYPE ROUTING layer in the LEF");
+    }
+    routingLayerBegin = resolveRoutingLayer(rawdb, grSetting.bottomRoutingLayer, 0, "bottom");
+    routingLayerEnd = resolveRoutingLayer(rawdb, grSetting.topRoutingLayer, nLayers - 1, "top");
+    if (routingLayerBegin > routingLayerEnd) {
+        throw std::runtime_error(
+            "GPUGR bottom routing layer '" + grSetting.bottomRoutingLayer
+            + "' is above top routing layer '" + grSetting.topRoutingLayer + "'");
+    }
+    logger.info("GPUGR routing layers [%d, %d] (%s -> %s)",
+                routingLayerBegin,
+                routingLayerEnd,
+                rawdb.getRLayer(routingLayerBegin)->name().c_str(),
+                rawdb.getRLayer(routingLayerEnd)->name().c_str());
     layerWidth.resize(nLayers);
     layerPitch.resize(nLayers);
     tracks.resize(nLayers);
@@ -219,6 +285,7 @@ void GRDatabase::setupCapacity() {
     }
     capacity.resize(gridGraphSize, 0);
     for (int i = 0; i < nLayers; i++) {
+        if (!isRoutingLayerEnabled(i)) continue;
         if ((i & 1) ^ m1direction) {
             for (int j = 0; j < xSize; j++) {
                 int cap = lower_bound(tracks[i].begin(), tracks[i].end(), gridlines[0][j + 1]) -
@@ -242,6 +309,7 @@ void GRDatabase::setupCapacity() {
 void GRDatabase::setupCapacityBookshelf() {
     capacity.resize(gridGraphSize, 0);
     for (int i = 0; i < nLayers; i++) {
+        if (!isRoutingLayerEnabled(i)) continue;
         int oricap = std::max(rawdb.bsRouteInfo->capH[i], rawdb.bsRouteInfo->capV[i]);
         float cap = oricap / (layerPitch[i]);
         if ((i & 1) ^ m1direction) {
@@ -263,6 +331,7 @@ void GRDatabase::setupCapacityBookshelf() {
 void GRDatabase::setupWireDist() {
     wireDist.resize(gridGraphSize, 1e9);
     for (int i = 0; i < nLayers; i++) {
+        if (!isRoutingLayerEnabled(i)) continue;
         for (int j = 0; j < xSize; j++) {
             for (int k = 0; k < ySize; k++) {
                 int idx = encodeId(i, j, k);
@@ -290,8 +359,8 @@ void GRDatabase::updateUsageLength() {
     fixedUsage.resize(gridGraphSize, 0);
     fixedLength.resize(gridGraphSize, 0);
 
-    int obsStartLayer = 1;
-    for (int l = obsStartLayer; l < nLayers; l++) {
+    int obsStartLayer = std::max(1, routingLayerBegin);
+    for (int l = obsStartLayer; l <= routingLayerEnd && l < nLayers; l++) {
         int dir = (l & 1) ^ m1direction;
         int outerSize = (dir == 0 ? ySize : xSize);
         int innerSize = (dir == 0 ? xSize : ySize);
@@ -516,7 +585,7 @@ void GRDatabase::markObs(std::vector<RectOnLayer>& allObs,
     if (db::setting.BookshelfVariety != "") {
         return markObsBookShelf(allObs, wireUsage, wireTotalLength);
     }
-    int obsStartLayer = 1;
+    int obsStartLayer = std::max(1, routingLayerBegin);
 
     wireUsage.resize(gridGraphSize, 0);
     wireTotalLength.resize(gridGraphSize, 0);
@@ -524,10 +593,10 @@ void GRDatabase::markObs(std::vector<RectOnLayer>& allObs,
     std::vector<std::vector<int>> layerToObjIdx(nLayers);
     for (unsigned i = 0; i < allObs.size(); i++) {
         int l = allObs[i].layer;
-        if (l < obsStartLayer) continue;
+        if (l < obsStartLayer || l >= nLayers || !isRoutingLayerEnabled(l)) continue;
         layerToObjIdx[allObs[i].layer].push_back(i);
     }
-    for (int l = obsStartLayer; l < nLayers; l++) {
+    for (int l = obsStartLayer; l <= routingLayerEnd && l < nLayers; l++) {
         auto& t = tracks[l];
         int dir = (l & 1) ^ m1direction;
 
@@ -645,7 +714,7 @@ void GRDatabase::markObs(std::vector<RectOnLayer>& allObs,
 void GRDatabase::markObsBookShelf(std::vector<RectOnLayer>& allObs,
                                   std::vector<float>& wireUsage,
                                   std::vector<float>& wireTotalLength) {
-    int obsStartLayer = 1;
+    int obsStartLayer = std::max(1, routingLayerBegin);
 
     wireUsage.resize(gridGraphSize, 0);
     wireTotalLength.resize(gridGraphSize, 0);
@@ -653,7 +722,7 @@ void GRDatabase::markObsBookShelf(std::vector<RectOnLayer>& allObs,
     std::vector<std::vector<int>> layerToObjIdx(nLayers);
     for (unsigned i = 0; i < allObs.size(); i++) {
         int l = allObs[i].layer;
-        if (l < obsStartLayer) continue;
+        if (l < obsStartLayer || l >= nLayers || !isRoutingLayerEnabled(l)) continue;
         layerToObjIdx[allObs[i].layer].push_back(i);
     }
 
@@ -664,7 +733,7 @@ void GRDatabase::markObsBookShelf(std::vector<RectOnLayer>& allObs,
         layer2oricap[i] = oricap;
     }
     // ignore M1 obs
-    for (int l = obsStartLayer; l < nLayers; l++) {
+    for (int l = obsStartLayer; l <= routingLayerEnd && l < nLayers; l++) {
         int dir = (l & 1) ^ m1direction;
 
         std::vector<std::vector<std::vector<utils::IntervalT<int>>>> markingBufferLUT;
@@ -824,7 +893,10 @@ void GRDatabase::setupGrNets() {
                     int ymax =
                         std::lower_bound(gridlines[1].begin(), gridlines[1].end(), e.hy) - gridlines[1].begin() - 1;
                     // boundary check
-                    int elayer = std::min(std::max(e.layer, 0), nLayers - 1);
+                    // A pin shape below/above the requested routing window is
+                    // attached to the nearest legal routing layer. This keeps
+                    // M1 standard-cell pins usable when routing starts at M2.
+                    int elayer = std::min(std::max(e.layer, routingLayerBegin), routingLayerEnd);
                     xmin = std::min(std::max(xmin, 0), xSize - 1);
                     ymin = std::min(std::max(ymin, 0), ySize - 1);
                     xmax = std::min(std::max(xmax, 0), xSize - 1);
@@ -873,7 +945,8 @@ void GRDatabase::setupGrNets() {
                     }
                 }
             }
-            int xmin = nMaxGrid - 1, ymin = nMaxGrid - 1, xmax = 0, ymax = 0, lmin = nLayers - 1, lmax = 0;
+            int xmin = nMaxGrid - 1, ymin = nMaxGrid - 1, xmax = 0, ymax = 0, lmin = routingLayerEnd,
+                lmax = routingLayerBegin;
             for (const auto& accessPoints : pinAccessPoints) {
                 for (const auto [layer, x, y] : accessPoints) {
                     lmin = std::min(lmin, layer);
@@ -940,7 +1013,7 @@ void GRDatabase::setupGrNets() {
             }
             for (auto& accessPoint : selectedAccessPoints) {
                 utils::IntervalT<int>& fixedLayers = accessPoint.second.second;
-                fixedLayers.high = std::min(fixedLayers.high + 2, nLayers - 1);
+                fixedLayers.high = std::min(fixedLayers.high + 2, routingLayerEnd);
             }
             std::vector<std::vector<int>> grNetPins(selectedAccessPoints.size());
             std::vector<std::vector<int>> grPin2GpdbPins(selectedAccessPoints.size());

@@ -159,6 +159,8 @@ def _save_ggr_artifacts(
             "route_xSize": int(gr_params.get("route_xSize", 0)),
             "route_ySize": int(gr_params.get("route_ySize", 0)),
             "rrrIters": int(gr_params.get("rrrIters", 0)),
+            "bottom_routing_layer": str(gr_params.get("bottom_routing_layer", "")),
+            "top_routing_layer": str(gr_params.get("top_routing_layer", "")),
             "maps_path": maps_path,
             "png_dir": png_dir,
         }
@@ -214,6 +216,43 @@ def calc_gr_wl_via(grdb, routeforce):
     gr_wirelength = gr_wirelength * max(step_x, step_y) / layer_m2_pitch
     
     return gr_wirelength, gr_numVias
+
+
+def _aggregate_routing_layers(demand_map, capacity_map, layer_ids):
+    if layer_ids.numel() == 0:
+        return torch.zeros_like(demand_map[0])
+    demand = demand_map.index_select(0, layer_ids).sum(dim=0)
+    capacity = capacity_map.index_select(0, layer_ids).sum(dim=0)
+    floor = torch.finfo(capacity.dtype).eps
+    return torch.where(
+        capacity > floor,
+        demand / capacity.clamp(min=floor),
+        torch.zeros_like(demand),
+    )
+
+
+def _routing_layer_metadata(routeforce, layer_count):
+    default_range = (0, max(0, int(layer_count) - 1))
+    getter = getattr(routeforce, "routing_layer_range", None)
+    if not callable(getter):
+        return default_range, []
+    raw_range = getter()
+    if raw_range is None or len(raw_range) != 2:
+        raise RuntimeError("Invalid GGR routing layer range: %r" % (raw_range,))
+    begin, end = int(raw_range[0]), int(raw_range[1])
+    if begin < 0 or end >= int(layer_count) or begin > end:
+        raise RuntimeError(
+            "GGR routing layer range [%d, %d] is invalid for %d layers"
+            % (begin, end, int(layer_count))
+        )
+    names_getter = getattr(routeforce, "routing_layer_names", None)
+    names = list(names_getter()) if callable(names_getter) else []
+    if names and len(names) != int(layer_count):
+        raise RuntimeError(
+            "GGR routing layer name count does not match map layer count: %d != %d"
+            % (len(names), int(layer_count))
+        )
+    return (begin, end), names
 
 def estimate_num_shorts(routeforce, gpdb, cap_map, wire_dmd_map, via_dmd_map):
     step_x, step_y = routeforce.gcell_steps()
@@ -382,6 +421,12 @@ def run_gr_and_fft(args, logger, data, rawdb, gpdb, ps, grdb=None, skip_m1_route
         "cuda:{}".format(args.gpu) if torch.cuda.is_available() else "cpu"
     )
     gr_params = {"device_id": args.gpu, "route_xSize": route_xSize, "route_ySize": route_ySize}
+    bottom_routing_layer = getattr(args, "bottom_routing_layer", "") or ""
+    top_routing_layer = getattr(args, "top_routing_layer", "") or ""
+    if bottom_routing_layer:
+        gr_params["bottom_routing_layer"] = bottom_routing_layer
+    if top_routing_layer:
+        gr_params["top_routing_layer"] = top_routing_layer
     gr_params.update(given_gr_params)
     append_gr_run_params(
         args,
@@ -409,18 +454,32 @@ def run_gr_and_fft(args, logger, data, rawdb, gpdb, ps, grdb=None, skip_m1_route
     routeforce.run_ggr()
     logger.info("--------- End GR ---------")
 
-    m1direction = gpdb.m1direction()  # 0 for H, 1 for V, metal1's layer idx is 0
-    hId = 1 if m1direction else 0
-    vId = 0 if m1direction else 1
-    aId = 0
-    if skip_m1_route:
-        aId = 1
-        hId = hId + 2 if hId == 0 else hId
-        vId = vId + 2 if vId == 0 else vId
-
     # 1.3) calculate capacity and demand map
     dmd_map, wire_dmd_map, via_dmd_map = routeforce.dmd_map()
     cap_map: torch.Tensor = routeforce.cap_map()
+    routing_layer_range, routing_layer_names = _routing_layer_metadata(
+        routeforce, dmd_map.size(0)
+    )
+    layer_ids = torch.arange(dmd_map.size(0), device=dmd_map.device)
+    route_layers = (layer_ids >= routing_layer_range[0]) & (layer_ids <= routing_layer_range[1])
+    if skip_m1_route:
+        route_layers &= layer_ids != 0
+    layer_mask = route_layers.view(-1, 1, 1)
+    dmd_map = torch.where(layer_mask, dmd_map, torch.zeros_like(dmd_map))
+    wire_dmd_map = torch.where(layer_mask, wire_dmd_map, torch.zeros_like(wire_dmd_map))
+    via_dmd_map = torch.where(layer_mask, via_dmd_map, torch.zeros_like(via_dmd_map))
+    cap_map = torch.where(layer_mask, cap_map, torch.zeros_like(cap_map))
+    m1direction = gpdb.m1direction()  # 0 for H, 1 for V, metal1's layer idx is 0
+    h_id = 1 if m1direction else 0
+    v_id = 0 if m1direction else 1
+    if skip_m1_route:
+        if h_id == 0:
+            h_id += 2
+        if v_id == 0:
+            v_id += 2
+    h_ids = torch.nonzero(route_layers & ((layer_ids % 2) == (h_id % 2)), as_tuple=False).flatten()
+    v_ids = torch.nonzero(route_layers & ((layer_ids % 2) == (v_id % 2)), as_tuple=False).flatten()
+    union_ids = torch.nonzero(route_layers, as_tuple=False).flatten()
     save_ggr_artifacts = bool(getattr(args, "save_ggr_artifacts", False))
     raw_wire_dmd_map = None
     fix_usage_map = None
@@ -429,24 +488,41 @@ def run_gr_and_fft(args, logger, data, rawdb, gpdb, ps, grdb=None, skip_m1_route
         raw_wire_dmd_map = routeforce.raw_wire_dmd_map()
         fix_usage_map = routeforce.fix_usage_map()
         mov_usage_map = routeforce.mov_usage_map()
+        raw_wire_dmd_map = torch.where(
+            layer_mask, raw_wire_dmd_map, torch.zeros_like(raw_wire_dmd_map)
+        )
+        fix_usage_map = torch.where(layer_mask, fix_usage_map, torch.zeros_like(fix_usage_map))
+        mov_usage_map = torch.where(layer_mask, mov_usage_map, torch.zeros_like(mov_usage_map))
 
-    dmd_map2d: torch.Tensor = dmd_map[aId:].sum(dim=0)
-    wire_dmd_map2d: torch.Tensor = wire_dmd_map[aId:].sum(dim=0)
-    via_dmd_map2d: torch.Tensor = via_dmd_map[aId:].sum(dim=0)
-    cap_map2d: torch.Tensor = cap_map[aId:].sum(dim=0)
+    if union_ids.numel():
+        dmd_map2d: torch.Tensor = dmd_map.index_select(0, union_ids).sum(dim=0)
+        wire_dmd_map2d: torch.Tensor = wire_dmd_map.index_select(0, union_ids).sum(dim=0)
+        via_dmd_map2d: torch.Tensor = via_dmd_map.index_select(0, union_ids).sum(dim=0)
+        cap_map2d: torch.Tensor = cap_map.index_select(0, union_ids).sum(dim=0)
+    else:
+        dmd_map2d = torch.zeros_like(dmd_map[0])
+        wire_dmd_map2d = torch.zeros_like(wire_dmd_map[0])
+        via_dmd_map2d = torch.zeros_like(via_dmd_map[0])
+        cap_map2d = torch.zeros_like(cap_map[0])
 
-    cg_mapAll = dmd_map2d / cap_map2d  # ignore metal0
+    cg_mapAll = _aggregate_routing_layers(dmd_map, cap_map, union_ids)
 
     # input_mat = cg_mapAll
     input_mat = torch.where(cg_mapAll > 1, cg_mapAll - 1, 0)
     # input_mat = torch.log(input_mat + 1)
 
-    cg_mapH = dmd_map[hId::2].sum(dim=0) / cap_map[hId::2].sum(dim=0)
-    cg_mapV = dmd_map[vId::2].sum(dim=0) / cap_map[vId::2].sum(dim=0)
+    cg_mapH = _aggregate_routing_layers(dmd_map, cap_map, h_ids)
+    cg_mapV = _aggregate_routing_layers(dmd_map, cap_map, v_ids)
     cg_mapHV = torch.stack((cg_mapH, cg_mapV))
     cg_mapHV = torch.where(cg_mapHV > 1, cg_mapHV - 1, 0)
 
-    cgOvfl = (dmd_map[aId:] / cap_map[aId:]).max(dim=0)[0].clamp(min=1.0) - 1
+    if union_ids.numel():
+        layer_ratios = dmd_map.index_select(0, union_ids) / cap_map.index_select(
+            0, union_ids
+        ).clamp(min=torch.finfo(cap_map.dtype).eps)
+        cgOvfl = layer_ratios.max(dim=0)[0].clamp(min=1.0) - 1
+    else:
+        cgOvfl = torch.zeros_like(cg_mapAll)
     map_raw = (dmd_map, wire_dmd_map, via_dmd_map, cap_map)
     map_2d = (dmd_map2d, wire_dmd_map2d, via_dmd_map2d, cap_map2d)
 
@@ -550,6 +626,15 @@ def run_gr_and_fft(args, logger, data, rawdb, gpdb, ps, grdb=None, skip_m1_route
             "cg_map_union_raw_stats": _summarize_map_tensor(cg_mapAll, overflow_threshold=1.0),
             "cg_map_h_raw_stats": _summarize_map_tensor(cg_mapH, overflow_threshold=1.0),
             "cg_map_v_raw_stats": _summarize_map_tensor(cg_mapV, overflow_threshold=1.0),
+            "routing_layer_begin": int(routing_layer_range[0]),
+            "routing_layer_end": int(routing_layer_range[1]),
+            "routing_layer_names": [str(name) for name in routing_layer_names],
+            "enabled_routing_layer_names": [
+                str(name)
+                for name in routing_layer_names[
+                    routing_layer_range[0] : routing_layer_range[1] + 1
+                ]
+            ] if routing_layer_names else [],
         }
         artifact_root, metrics_path = _save_ggr_artifacts(
             args=args,

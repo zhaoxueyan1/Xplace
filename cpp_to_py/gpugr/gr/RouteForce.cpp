@@ -112,7 +112,9 @@ void RouteForce::run_ggr() {
                       grdb.cgxsize,
                       grdb.cgysize,
                       grdb.m1direction,
-                      grdb.csrnScale);
+                      grdb.csrnScale,
+                      grdb.routingLayerBegin,
+                      grdb.routingLayerEnd);
     router.setMap(grdb.capacity, grdb.wireDist, grdb.fixedLength, grdb.fixedUsage);
 
     std::vector<float> _unitShortVioCost(grdb.nLayers), _unitShortVioCostDiscounted(grdb.nLayers);
@@ -331,6 +333,14 @@ std::tuple<int, int> RouteForce::getGcellStep() { return {grdb.mainGcellStepX, g
 std::vector<int> RouteForce::getLayerPitch() { return grdb.layerPitch; }
 
 std::vector<int> RouteForce::getLayerWidth() { return grdb.layerWidth; }
+
+std::tuple<int, int> RouteForce::getRoutingLayerRange() const {
+    return {grdb.routingLayerBegin, grdb.routingLayerEnd};
+}
+
+std::vector<std::string> RouteForce::getRoutingLayerNames() const {
+    return grdb.routingLayerNames();
+}
 
 std::vector<std::vector<int>> RouteForce::getRawRoutes() {
     if (backend == GGRBackend::CPU_PR) return cpuRouter.getRawRoutes();

@@ -31,6 +31,9 @@ public:
 private:
     int encodedIndex(int layer, int x, int y) const;
     std::tuple<int, int, int> decodeIndex(int encoded) const;
+    bool isRoutingLayerEnabled(int layer) const {
+        return routingLayerBegin <= layer && layer <= routingLayerEnd;
+    }
     float wireCost(int encoded) const;
     float viaCost(int encoded) const;
     int calcWireCost(int encoded) const;
@@ -61,6 +64,8 @@ private:
     int X = 0;
     int Y = 0;
     int DIRECTION = 0;
+    int routingLayerBegin = 0;
+    int routingLayerEnd = -1;
     std::vector<float> capacity;
     std::vector<float> wireDist;
     std::vector<float> fixedLength;

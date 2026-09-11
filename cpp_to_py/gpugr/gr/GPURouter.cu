@@ -12,6 +12,10 @@ constexpr int MAX_ROUTE_LEN_PER_PIN = 160;
 constexpr int INF = 10000000;
 constexpr int MAX_COST = 10000000;
 
+__host__ __device__ __forceinline__ bool routingLayerEnabled(int layer, int begin, int end) {
+    return begin <= layer && layer <= end;
+}
+
 #define BLOCK_SIZE 512
 #define BLOCK_NUMBER(n) (((n) + (BLOCK_SIZE) - 1) / BLOCK_SIZE)
 
@@ -25,8 +29,18 @@ constexpr int MAX_COST = 10000000;
 
 __managed__ int STAMP = 0, wireLen, viaLen;
 
-void GPURouter::initialize(int device_id, int layer, int x, int y, int N_, int cgxsize_, int cgysize_, int direction, int csrn_scale) {
-    gpuMR.startGPU(device_id, layer, cgxsize_, cgysize_);
+void GPURouter::initialize(int device_id,
+                           int layer,
+                           int x,
+                           int y,
+                           int N_,
+                           int cgxsize_,
+                           int cgysize_,
+                           int direction,
+                           int csrn_scale,
+                           int routing_layer_begin,
+                           int routing_layer_end) {
+    gpuMR.startGPU(device_id, layer, cgxsize_, cgysize_, routing_layer_begin, routing_layer_end);
     DEVICE_ID = device_id;
     DIRECTION = direction;
     COARSENING_SCALE = csrn_scale;
@@ -34,6 +48,8 @@ void GPURouter::initialize(int device_id, int layer, int x, int y, int N_, int c
     cgysize = cgysize_;
 
     LAYER = layer;
+    routingLayerBegin = routing_layer_begin;
+    routingLayerEnd = routing_layer_end < 0 ? layer - 1 : routing_layer_end;
     N = N_;
     X = x;
     Y = y;
@@ -138,9 +154,27 @@ __global__ void calculateCellResource(float *cell_resource, int *wires, float *f
     cell_resource[idx] = cellResource(idx, wires, fixed, vias, capacity, N, LAYER);
 }
 
-__global__ void calculateCoarseCost(float *cell_resource, int *cost, int *wires, float *fixed, int *vias, float *capacity, int N, int xsize, int ysize, int X, int Y, int LAYER, int DIRECTION, int COARSENING_SCALE) {
+__global__ void calculateCoarseCost(float *cell_resource,
+                                    int *cost,
+                                    int *wires,
+                                    float *fixed,
+                                    int *vias,
+                                    float *capacity,
+                                    int N,
+                                    int xsize,
+                                    int ysize,
+                                    int X,
+                                    int Y,
+                                    int LAYER,
+                                    int DIRECTION,
+                                    int COARSENING_SCALE,
+                                    int routing_layer_begin,
+                                    int routing_layer_end) {
     int layer = blockIdx.x / xsize, x = blockIdx.x % xsize, y = threadIdx.x;
-    if(layer == 0) {
+    // GGR's coarse maze stage has historically reserved layer 0 (M1) for
+    // pin access; keep it out of the coarse search even when the configured
+    // range starts at the first LEF routing layer.
+    if(layer == 0 || !routingLayerEnabled(layer, routing_layer_begin, routing_layer_end)) {
         cost[blockIdx.x * blockDim.x + threadIdx.x] = 10000000;
         return;
     }
@@ -189,11 +223,27 @@ __global__ void calculateCoarseCost(float *cell_resource, int *cost, int *wires,
     }
 }
 
-__global__ void calculateCoarseVia(float *cell_resource, int *coarseVia, int *wires, float *fixed, int *vias, float *capacity, int N, int LAYER, int xsize, int ysize, int X, int Y, int DIRECTION, int COARSENING_SCALE) {
+__global__ void calculateCoarseVia(float *cell_resource,
+                                   int *coarseVia,
+                                   int *wires,
+                                   float *fixed,
+                                   int *vias,
+                                   float *capacity,
+                                   int N,
+                                   int LAYER,
+                                   int xsize,
+                                   int ysize,
+                                   int X,
+                                   int Y,
+                                   int DIRECTION,
+                                   int COARSENING_SCALE,
+                                   int routing_layer_begin,
+                                   int routing_layer_end) {
     int layer = blockIdx.x / xsize, x = blockIdx.x % xsize, y = threadIdx.x;
     int minx = x * COARSENING_SCALE, maxx = min(X - 1, x * COARSENING_SCALE + COARSENING_SCALE - 1);
     int miny = y * COARSENING_SCALE, maxy = min(Y - 1, y * COARSENING_SCALE + COARSENING_SCALE - 1);
-    if(layer + 1 < LAYER) {
+    if(layer + 1 < LAYER && routingLayerEnabled(layer, routing_layer_begin, routing_layer_end) &&
+       routingLayerEnabled(layer + 1, routing_layer_begin, routing_layer_end)) {
         float sum = 0, ans = 0;
         for(int i = minx; i <= maxx; i++)
             for(int j = miny; j <= maxy; j++)
@@ -212,6 +262,8 @@ __global__ void calculateCoarseVia(float *cell_resource, int *coarseVia, int *wi
                     sum += cell_resource[(layer + 1) * N * N + j * N + i];
         ans += 1.0 / max((float)0.1, sum / (maxx - minx + 1) / (maxy - miny + 1));   
         coarseVia[layer * xsize * ysize + x * ysize + y] = 100 * ans;
+    } else {
+        coarseVia[layer * xsize * ysize + x * ysize + y] = 10000000;
     }
 }
 
@@ -316,9 +368,26 @@ __global__ void traceBack(int *modifiedWire, int *modifiedVia, dtype *dist, int 
 }
 */
 
-__global__ void calculateWireCost(dtype *cost, float *wireDist, float *fixed, float *fixedLength, int *wires, int *vias, float *capacity, float *unitShortCost, float logisticSlope, int N, int LAYER) {
+__global__ void calculateWireCost(dtype *cost,
+                                  float *wireDist,
+                                  float *fixed,
+                                  float *fixedLength,
+                                  int *wires,
+                                  int *vias,
+                                  float *capacity,
+                                  float *unitShortCost,
+                                  float logisticSlope,
+                                  int N,
+                                  int LAYER,
+                                  int routing_layer_begin,
+                                  int routing_layer_end) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if(!(idx < LAYER * N * N && idx % N + 1 < N)) return;
+    int layer = idx / N / N;
+    if(!routingLayerEnabled(layer, routing_layer_begin, routing_layer_end)) {
+        cost[idx] = INF;
+        return;
+    }
     if(capacity[idx] < 0.01) {
         cost[idx] = INF;
         return;
@@ -333,13 +402,30 @@ __global__ void calculateWireCost(dtype *cost, float *wireDist, float *fixed, fl
     cost[idx] = (result_r > MAX_COST ? MAX_COST : result_r);
 }
 
-__global__ void calculateViaCost(int *wires, float *fixed, float *capacity, dtype *viaCost, float unitViaMultiplier, float unitViaCost, float logisticSlope, int N, int LAYER) {
+__global__ void calculateViaCost(int *wires,
+                                 float *fixed,
+                                 float *capacity,
+                                 dtype *viaCost,
+                                 float unitViaMultiplier,
+                                 float unitViaCost,
+                                 float logisticSlope,
+                                 int N,
+                                 int LAYER,
+                                 int routing_layer_begin,
+                                 int routing_layer_end) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     //if(idx >= viaLen) return;
     //idx = ids[idx];
     //if(modified[idx] != STAMP) return;
     if(idx >= (LAYER - 1) * N * N) return;
-    int layer = idx / N / N + 1, y = idx % (N * N) / N, x = idx % N;
+    int lowerLayer = idx / N / N;
+    int upperLayer = lowerLayer + 1;
+    if(!routingLayerEnabled(lowerLayer, routing_layer_begin, routing_layer_end) ||
+       !routingLayerEnabled(upperLayer, routing_layer_begin, routing_layer_end)) {
+        viaCost[idx] = INF;
+        return;
+    }
+    int layer = upperLayer, y = idx % (N * N) / N, x = idx % N;
     float result = unitViaCost * (unitViaMultiplier + inCellViaCost(idx, wires, fixed, capacity, logisticSlope, N) + inCellViaCost(layer * N * N + x * N + y, wires, fixed, capacity, logisticSlope, N));
     //result /= 100;
     int result_r = static_cast<int>(result);
@@ -824,8 +910,30 @@ void GPURouter::route(std::vector<GrNet> &nets, int iter) {
     // int batch_cnt = 0;
     double mrtime = 0, costtime = 0;
     for(auto batchSize : batchSizes) {
-        calculateWireCost<<<BLOCK_NUMBER(LAYER * N * N), BLOCK_SIZE>>> (cost, wireDist, fixed, fixedLength, wires, vias, capacity, unitShortCostDiscounted, logisticSlope, N, LAYER);
-        calculateViaCost<<<BLOCK_NUMBER((LAYER - 1) * N * N), BLOCK_SIZE>>> (wires, fixed, capacity, viaCost, unitViaMultiplier, unitViaCost, logisticSlope, N, LAYER);   
+        calculateWireCost<<<BLOCK_NUMBER(LAYER * N * N), BLOCK_SIZE>>> (cost,
+                                                                        wireDist,
+                                                                        fixed,
+                                                                        fixedLength,
+                                                                        wires,
+                                                                        vias,
+                                                                        capacity,
+                                                                        unitShortCostDiscounted,
+                                                                        logisticSlope,
+                                                                        N,
+                                                                        LAYER,
+                                                                        routingLayerBegin,
+                                                                        routingLayerEnd);
+        calculateViaCost<<<BLOCK_NUMBER((LAYER - 1) * N * N), BLOCK_SIZE>>> (wires,
+                                                                              fixed,
+                                                                              capacity,
+                                                                              viaCost,
+                                                                              unitViaMultiplier,
+                                                                              unitViaCost,
+                                                                              logisticSlope,
+                                                                              N,
+                                                                              LAYER,
+                                                                              routingLayerBegin,
+                                                                              routingLayerEnd);
         calculateCostSum<<<N, N / 2, N * sizeof(int64_t)>>> (LAYER, N, cost, costSum);
         if(iter == 0) {
             int offset = batchSize;
@@ -854,13 +962,61 @@ void GPURouter::route(std::vector<GrNet> &nets, int iter) {
             prpreparetime += clock() - t;
             t = clock();
             //cudaMemcpy(cuda_points, points, offset * sizeof(int), cudaMemcpyHostToDevice);
-            patternRoute(points, batchSize, costSum, viaCost, prDist, prev, wires, vias, routes, batchRouteOffsets, gbpoints, gbpinRoutes, X, Y, N, LAYER, DIRECTION);
+            patternRoute(points,
+                         batchSize,
+                         costSum,
+                         viaCost,
+                         prDist,
+                         prev,
+                         wires,
+                         vias,
+                         routes,
+                         batchRouteOffsets,
+                         gbpoints,
+                         gbpinRoutes,
+                         X,
+                         Y,
+                         N,
+                         LAYER,
+                         DIRECTION,
+                         routingLayerBegin,
+                         routingLayerEnd);
             
             prtime += clock() - t;
         } else {
             calculateCellResource<<<BLOCK_NUMBER(LAYER * N * N), BLOCK_SIZE>>> (cell_resource, wires, fixed, vias, capacity, N, LAYER, LAYER * N * N);
-            calculateCoarseCost<<<LAYER * cgxsize, cgysize>>> (cell_resource, gpuMR.cost, wires, fixed, vias, capacity, N, cgxsize, cgysize, X, Y, LAYER, DIRECTION, COARSENING_SCALE);    
-            calculateCoarseVia<<<(LAYER - 1) * cgxsize, cgysize>>> (cell_resource, gpuMR.via, wires, fixed, vias, capacity, N, LAYER, cgxsize, cgysize, X, Y, DIRECTION, COARSENING_SCALE);
+            calculateCoarseCost<<<LAYER * cgxsize, cgysize>>> (cell_resource,
+                                                               gpuMR.cost,
+                                                               wires,
+                                                               fixed,
+                                                               vias,
+                                                               capacity,
+                                                               N,
+                                                               cgxsize,
+                                                               cgysize,
+                                                               X,
+                                                               Y,
+                                                               LAYER,
+                                                               DIRECTION,
+                                                               COARSENING_SCALE,
+                                                               routingLayerBegin,
+                                                               routingLayerEnd);
+            calculateCoarseVia<<<(LAYER - 1) * cgxsize, cgysize>>> (cell_resource,
+                                                                    gpuMR.via,
+                                                                    wires,
+                                                                    fixed,
+                                                                    vias,
+                                                                    capacity,
+                                                                    N,
+                                                                    LAYER,
+                                                                    cgxsize,
+                                                                    cgysize,
+                                                                    X,
+                                                                    Y,
+                                                                    DIRECTION,
+                                                                    COARSENING_SCALE,
+                                                                    routingLayerBegin,
+                                                                    routingLayerEnd);
             gpuMR.run(DIRECTION, iter);
             int pin10 = 0;
             for(int i = 0; i < batchSize; i++) {
@@ -995,10 +1151,23 @@ void GPURouter::setToNets(std::vector<GrNet> &nets) {
             // std::cerr << "ERROR: too many routesSub! Please set MAX_ROUTE_LEN_PER_PIN larger than " << routesSub[0] / pinNumCPU[netId] << std::endl;
         }
         for(int i = 1; i < routesSub[0]; i += 2) {
+            const int lowerLayer = routesSub[i] / N / N;
             if (routesSub[i + 1] > 0) {
+                const int upperPoint = routesSub[i] + routesSub[i + 1] - 1;
+                const int upperLayer = upperPoint / N / N;
+                if (lowerLayer != upperLayer ||
+                    !routingLayerEnabled(lowerLayer, routingLayerBegin, routingLayerEnd)) {
+                    throw std::runtime_error(
+                        "backend=cuda operation=route generated wire outside GPUGR routing layer range");
+                }
                 wires.emplace_back(routesSub[i]);
                 wires.emplace_back(routesSub[i + 1]);
             } else if (routesSub[i + 1] == -1) {
+                if (!routingLayerEnabled(lowerLayer, routingLayerBegin, routingLayerEnd) ||
+                    !routingLayerEnabled(lowerLayer + 1, routingLayerBegin, routingLayerEnd)) {
+                    throw std::runtime_error(
+                        "backend=cuda operation=route generated via outside GPUGR routing layer range");
+                }
                 vias.emplace_back(routesSub[i]);
             }
         }

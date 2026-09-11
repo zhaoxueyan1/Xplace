@@ -9,6 +9,12 @@ __managed__ int debug;
 
 #define INF 1000000000
 constexpr int64_t PR_INF = (1LL << 60);
+constexpr int64_t PR_FINITE_LIMIT = PR_INF / 2;
+
+__device__ __forceinline__ bool isFinitePatternCost(int64_t value) {
+    return value >= 0 && value < PR_FINITE_LIMIT;
+}
+
 __global__ void initMap(int *map) { map[blockIdx.x * blockDim.x + threadIdx.x] = INF; }
 __global__ void initMap64(int64_t *map) { map[blockIdx.x * blockDim.x + threadIdx.x] = PR_INF; }
 template <typename T>
@@ -38,24 +44,42 @@ __device__ void viaSweep(int *map, int *prev, int *viaCost, int x, int y, int LA
             map[cur] = map[last] + viaCost[cur], prev[cur] = prev[last], prev[cur + LAYER * N * N] = last;
     }
 }
-__device__ void viaSweep64(int64_t *map, int *prev, int *viaCost, int x, int y, int LAYER, int N, int DIRECTION) {
+__device__ void viaSweep64(int64_t *map,
+                           int *prev,
+                           int *viaCost,
+                           int x,
+                           int y,
+                           int LAYER,
+                           int N,
+                           int DIRECTION,
+                           int routingLayerBegin,
+                           int routingLayerEnd) {
     map += 4 * LAYER * N * N;
     prev += 4 * LAYER * N * N;
-    for (int i = 1; i < LAYER; i++) {
+    const int firstLayer = max(1, routingLayerBegin);
+    const int lastLayer = min(LAYER - 1, routingLayerEnd);
+    if (firstLayer > lastLayer) return;
+    for (int i = firstLayer; i <= lastLayer; i++) {
         int cur = i * N * N + (((i & 1) ^ DIRECTION) ? x * N + y : y * N + x);
         prev[cur + LAYER * N * N] = cur;
     }
-    for (int i = 2; i < LAYER; i++) {
+    for (int i = firstLayer + 1; i <= lastLayer; i++) {
         int cur = i * N * N + (((i & 1) ^ DIRECTION) ? x * N + y : y * N + x);
         int last = (i - 1) * N * N + (((i & 1) ^ DIRECTION) ? y * N + x : x * N + y);
-        if (map[cur] > map[last] + viaCost[last])
-            map[cur] = map[last] + viaCost[last], prev[cur] = prev[last], prev[cur + LAYER * N * N] = last;
+        const int64_t previous = map[last];
+        const int64_t candidate = previous + viaCost[last];
+        if (isFinitePatternCost(previous) && viaCost[last] < INF &&
+            isFinitePatternCost(candidate) && map[cur] > candidate)
+            map[cur] = candidate, prev[cur] = prev[last], prev[cur + LAYER * N * N] = last;
     }
-    for (int i = LAYER - 2; i >= 1; i--) {
+    for (int i = lastLayer - 1; i >= firstLayer; i--) {
         int cur = i * N * N + (((i & 1) ^ DIRECTION) ? x * N + y : y * N + x);
         int last = (i + 1) * N * N + (((i & 1) ^ DIRECTION) ? y * N + x : x * N + y);
-        if (map[cur] > map[last] + viaCost[cur])
-            map[cur] = map[last] + viaCost[cur], prev[cur] = prev[last], prev[cur + LAYER * N * N] = last;
+        const int64_t previous = map[last];
+        const int64_t candidate = previous + viaCost[cur];
+        if (isFinitePatternCost(previous) && viaCost[cur] < INF &&
+            isFinitePatternCost(candidate) && map[cur] > candidate)
+            map[cur] = candidate, prev[cur] = prev[last], prev[cur + LAYER * N * N] = last;
     }
 }
 __global__ void cudaLshapePR(int *map,
@@ -624,13 +648,21 @@ __global__ void cudaPatternRouteParallel(int64_t *map,
                                          int *gbpinRoutes,
                                          int LAYER,
                                          int N,
-                                         int DIRECTION) {
+                                         int DIRECTION,
+                                         int routingLayerBegin,
+                                         int routingLayerEnd) {
     // printf("%d offset %d\n", threadIdx.x, points[threadIdx.x]);
     gbpoints += gbpoints[blockIdx.x];
     points += points[blockIdx.x];
     routes += routeOffsets[blockIdx.x];
     if (threadIdx.x == 0) routes[0] = 1;
     __syncthreads();
+    const int firstLayer = max(1, routingLayerBegin);
+    const int lastLayer = min(LAYER - 1, routingLayerEnd);
+    if (firstLayer > lastLayer) {
+        if (threadIdx.x == 0) routes[0] = -1;
+        return;
+    }
     int node_cnt = points[1];
     points += 2;
     for (int t = 6 * (node_cnt - 1); t >= 0; t -= 6) {
@@ -641,7 +673,7 @@ __global__ void cudaPatternRouteParallel(int64_t *map,
                 int fromx = childPos / N, fromy = childPos % N;
                 if (fromx != tox && fromy != toy) {
                     for (int a = min(fromx, tox) + threadIdx.x; a <= max(fromx, tox); a += blockDim.x) {
-                        for (int i = 1; i < LAYER; i++) {
+                        for (int i = firstLayer; i <= lastLayer; i++) {
                             if ((i & 1) ^ DIRECTION) {
                                 map[4 * LAYER * N * N + i * N * N + a * N + toy] = PR_INF;
                                 map[4 * LAYER * N * N + i * N * N + a * N + fromy] = PR_INF;
@@ -653,7 +685,7 @@ __global__ void cudaPatternRouteParallel(int64_t *map,
                     }
                     __syncthreads();
                     for (int b = min(fromy, toy) + threadIdx.x; b <= max(fromy, toy); b += blockDim.x) {
-                        for (int i = 1; i < LAYER; i++) {
+                        for (int i = firstLayer; i <= lastLayer; i++) {
                             if ((i & 1) ^ DIRECTION) {
                                 map[4 * LAYER * N * N + i * N * N + tox * N + b] = PR_INF;
                                 map[4 * LAYER * N * N + i * N * N + fromx * N + b] = PR_INF;
@@ -664,7 +696,7 @@ __global__ void cudaPatternRouteParallel(int64_t *map,
                         }
                     }
                     __syncthreads();
-                    for (int i = 1; i < LAYER; i++) {
+                    for (int i = firstLayer; i <= lastLayer; i++) {
                         if ((i & 1) ^ DIRECTION) {
                             int last = i * N * N + fromx * N + fromy;
                             for (int b = min(fromy, toy) + threadIdx.x; b <= max(fromy, toy); b += blockDim.x) {
@@ -692,12 +724,32 @@ __global__ void cudaPatternRouteParallel(int64_t *map,
                     }
                     __syncthreads();
                     for (int b = min(fromy, toy) + threadIdx.x; b <= max(fromy, toy); b += blockDim.x)
-                        if (b != fromy) viaSweep64(map, prev, viaCost, fromx, b, LAYER, N, DIRECTION);
+                        if (b != fromy)
+                            viaSweep64(map,
+                                       prev,
+                                       viaCost,
+                                       fromx,
+                                       b,
+                                       LAYER,
+                                       N,
+                                       DIRECTION,
+                                       routingLayerBegin,
+                                       routingLayerEnd);
                     __syncthreads();
                     for (int b = min(fromx, tox) + threadIdx.x; b <= max(fromx, tox); b += blockDim.x)
-                        if (b != fromx) viaSweep64(map, prev, viaCost, b, fromy, LAYER, N, DIRECTION);
+                        if (b != fromx)
+                            viaSweep64(map,
+                                       prev,
+                                       viaCost,
+                                       b,
+                                       fromy,
+                                       LAYER,
+                                       N,
+                                       DIRECTION,
+                                       routingLayerBegin,
+                                       routingLayerEnd);
                     __syncthreads();
-                    for (int i = 1; i < LAYER; i++) {
+                    for (int i = firstLayer; i <= lastLayer; i++) {
                         if ((i & 1) ^ DIRECTION) {
                             for (int b = min(fromx, tox) + threadIdx.x; b <= max(fromx, tox); b += blockDim.x) {
                                 int last = i * N * N + b * N + fromy, cur = i * N * N + b * N + toy;
@@ -723,12 +775,32 @@ __global__ void cudaPatternRouteParallel(int64_t *map,
                     }
                     __syncthreads();
                     for (int b = min(fromy, toy) + threadIdx.x; b <= max(fromy, toy); b += blockDim.x)
-                        if (b != toy) viaSweep64(map, prev, viaCost, tox, b, LAYER, N, DIRECTION);
+                        if (b != toy)
+                            viaSweep64(map,
+                                       prev,
+                                       viaCost,
+                                       tox,
+                                       b,
+                                       LAYER,
+                                       N,
+                                       DIRECTION,
+                                       routingLayerBegin,
+                                       routingLayerEnd);
                     __syncthreads();
                     for (int b = min(fromx, tox) + threadIdx.x; b <= max(fromx, tox); b += blockDim.x)
-                        if (b != tox) viaSweep64(map, prev, viaCost, b, toy, LAYER, N, DIRECTION);
+                        if (b != tox)
+                            viaSweep64(map,
+                                       prev,
+                                       viaCost,
+                                       b,
+                                       toy,
+                                       LAYER,
+                                       N,
+                                       DIRECTION,
+                                       routingLayerBegin,
+                                       routingLayerEnd);
                     __syncthreads();
-                    for (int i = 1 + threadIdx.x; i < LAYER; i += blockDim.x) {
+                    for (int i = firstLayer + threadIdx.x; i <= lastLayer; i += blockDim.x) {
                         if ((i & 1) ^ DIRECTION) {
                             int cur = i * N * N + tox * N + toy;
                             for (int b = min(fromy, toy); b <= max(fromy, toy); b++) {
@@ -761,7 +833,7 @@ __global__ void cudaPatternRouteParallel(int64_t *map,
                     }
                     __syncthreads();
                 } else if (fromx == tox) {
-                    for (int i = 1 + threadIdx.x; i < LAYER; i += blockDim.x) {
+                    for (int i = firstLayer + threadIdx.x; i <= lastLayer; i += blockDim.x) {
                         if ((i & 1) ^ DIRECTION) {
                             int last = i * N * N + fromx * N + fromy, cur = i * N * N + tox * N + toy;
                             int64_t cost = last < cur ? wireCostSum[last] - wireCostSum[cur]
@@ -774,7 +846,7 @@ __global__ void cudaPatternRouteParallel(int64_t *map,
                     }
                     __syncthreads();
                 } else if (fromy == toy) {
-                    for (int i = 1 + threadIdx.x; i < LAYER; i += blockDim.x) {
+                    for (int i = firstLayer + threadIdx.x; i <= lastLayer; i += blockDim.x) {
                         if (!(i & 1) ^ DIRECTION) {
                             int last = i * N * N + fromy * N + fromx, cur = i * N * N + toy * N + tox;
                             int64_t cost = last < cur ? wireCostSum[last] - wireCostSum[cur]
@@ -796,23 +868,29 @@ __global__ void cudaPatternRouteParallel(int64_t *map,
         }
         __syncthreads();
         if (threadIdx.x == 0) {
-            for (int lower = 0; lower < LAYER; lower++) {
-                int viaSum = 0, minCost = INF, bestpos[3] = {0, 0, 0},
-                    costs[3] = {
-                        points[t + 3] == -1 ? 0 : INF, points[t + 4] == -1 ? 0 : INF, points[t + 5] == -1 ? 0 : INF};
-                for (int upper = lower; upper < LAYER; upper++) {
+            for (int lower = firstLayer; lower <= lastLayer; lower++) {
+                int64_t viaSum = 0, minCost = PR_INF;
+                int bestpos[3] = {0, 0, 0};
+                int64_t costs[3] = {
+                    points[t + 3] == -1 ? 0 : PR_INF,
+                    points[t + 4] == -1 ? 0 : PR_INF,
+                    points[t + 5] == -1 ? 0 : PR_INF};
+                for (int upper = lower; upper <= lastLayer; upper++) {
                     int idx = upper * N * N + (((upper & 1) ^ DIRECTION) ? tox * N + toy : toy * N + tox);
                     for (int j = 0; j < 3; j++)
                         if (points[t + 3 + j] != -1) {
-                            if (map[idx + (j + 1) * LAYER * N * N] < costs[j])
-                                costs[j] = map[idx + (j + 1) * LAYER * N * N], bestpos[j] = upper;
+                            int64_t childCost = map[idx + (j + 1) * LAYER * N * N];
+                            if (isFinitePatternCost(childCost) && childCost < costs[j])
+                                costs[j] = childCost, bestpos[j] = upper;
                         }
-                    if (1LL * costs[0] + costs[1] + costs[2] < minCost) minCost = costs[0] + costs[1] + costs[2];
-                    if (minlayer == -1 || (lower <= minlayer && maxlayer <= upper)) {
+                    int64_t candidateCost = costs[0] + costs[1] + costs[2];
+                    if (isFinitePatternCost(candidateCost) && candidateCost < minCost) minCost = candidateCost;
+                    if (isFinitePatternCost(minCost) && (minlayer == -1 || (lower <= minlayer && maxlayer <= upper))) {
                         for (int i = lower; i <= upper; i++) {
                             int index = i * N * N + (((i & 1) ^ DIRECTION) ? tox * N + toy : toy * N + tox);
-                            if (map[index] > minCost + viaSum)
-                                map[index] = minCost + viaSum,
+                            int64_t candidate = minCost + viaSum;
+                            if (isFinitePatternCost(candidate) && map[index] > candidate)
+                                map[index] = candidate,
                                 prev[index] =
                                     (((lower * LAYER + upper) * LAYER + bestpos[2]) * LAYER + bestpos[1]) * LAYER +
                                     bestpos[0];
@@ -821,7 +899,13 @@ __global__ void cudaPatternRouteParallel(int64_t *map,
                     // if(t == 0)
                     //     printf("[%d, %d] best = %d, cost = %d, via=%d\n", lower, upper, prev[25025] % LAYER,
                     //     costs[0], viaSum);
-                    viaSum += viaCost[idx];
+                    if (viaCost[idx] >= INF) {
+                        viaSum = PR_INF;
+                    } else if (isFinitePatternCost(viaSum + viaCost[idx])) {
+                        viaSum += viaCost[idx];
+                    } else {
+                        viaSum = PR_INF;
+                    }
                 }
                 // if(t == 0)
                 //     printf("mincost = %d, [%d, %d] bestpos = %d\n", minCost, minlayer, maxlayer, bestpos[0]);
@@ -832,7 +916,7 @@ __global__ void cudaPatternRouteParallel(int64_t *map,
     __syncthreads();
     if (threadIdx.x == 0) {
         int64_t minTotalDist = PR_INF;
-        for (int i = 0; i < LAYER; i++) {
+        for (int i = firstLayer; i <= lastLayer; i++) {
             int x = points[0] / N, y = points[0] % N;
             int idx = i * N * N + (((i & 1) ^ DIRECTION) ? x * N + y : y * N + x);
 
@@ -843,7 +927,7 @@ __global__ void cudaPatternRouteParallel(int64_t *map,
                 // printf("layer = %d, idx=%d, bestpos = %d\n", i, idx, prev[idx] % LAYER);
             }
         }
-        if (minTotalDist == PR_INF || minTotalDist < 0) {
+        if (!isFinitePatternCost(minTotalDist)) {
             printf("failed routeOffset=%d node_cnt=%d rootPos=%d minTotalDist=%lld\n",
                    points[-2],
                    node_cnt,
@@ -1210,7 +1294,9 @@ void patternRoute(int *points,
                   int Y,
                   int N,
                   int LAYER,
-                  int DIRECTION) {
+                  int DIRECTION,
+                  int routingLayerBegin,
+                  int routingLayerEnd) {
     // debug = 1;
     initMap64<<<6 * LAYER * N * 2, N / 2>>>(map);
     // cudaDeviceSynchronize();
@@ -1223,8 +1309,23 @@ void patternRoute(int *points,
     //         wires, vias, routes, gbpoints + gbpoints[i], gbpinRoutes, LAYER, N, DIRECTION);
     // }
     cudaPatternRouteParallel<<<batchSize, 32>>>(
-        map, points, wireCostSum, viaCost, prev, prev + 10 * LAYER * N * N, 
-        wires, vias, routes, batchRouteOffsets, gbpoints, gbpinRoutes, LAYER, N, DIRECTION);
+        map,
+        points,
+        wireCostSum,
+        viaCost,
+        prev,
+        prev + 10 * LAYER * N * N,
+        wires,
+        vias,
+        routes,
+        batchRouteOffsets,
+        gbpoints,
+        gbpinRoutes,
+        LAYER,
+        N,
+        DIRECTION,
+        routingLayerBegin,
+        routingLayerEnd);
 
     // cudaPatternRoute<<<batchSize, LAYER>>> (map, points, wireCostSum, viaCost, prev, wires, vias, routes, LAYER, N,
     // DIRECTION);

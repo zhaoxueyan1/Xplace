@@ -12,11 +12,15 @@ namespace gr {
 namespace {
 
 constexpr int INF = 10000000;
-constexpr int PR_INT_INF = 1000000000;
 constexpr int MAX_COST = 10000000;
 constexpr int64_t PR_INF = (1LL << 60);
+constexpr int64_t PR_FINITE_LIMIT = PR_INF / 2;
 // Match the CUDA route-buffer capacity when constructing route-offset identities.
 constexpr int MAX_ROUTE_LEN_PER_PIN = 160;
+
+inline bool isFinitePatternCost(int64_t value) {
+    return value >= 0 && value < PR_FINITE_LIMIT;
+}
 
 inline int boundedExp2(float x) {
     int shift = static_cast<int>(x);
@@ -34,6 +38,8 @@ void CPURouter::initialize(const gr::GRDatabase& grdb) {
     X = grdb.xSize;
     Y = grdb.ySize;
     DIRECTION = grdb.m1direction;
+    routingLayerBegin = grdb.routingLayerBegin;
+    routingLayerEnd = grdb.routingLayerEnd;
     const int gridGraphSize = LAYER * N * N;
     wires.assign(gridGraphSize, 0);
     vias.assign(gridGraphSize, 0);
@@ -147,6 +153,10 @@ int CPURouter::calcWireCost(int encoded) const {
     if (!(encoded < LAYER * N * N && encoded % N + 1 < N)) {
         return INF;
     }
+    const int layer = encoded / N / N;
+    if (!isRoutingLayerEnabled(layer)) {
+        return INF;
+    }
     if (capacity[encoded] < 0.01f) {
         return INF;
     }
@@ -167,7 +177,12 @@ int CPURouter::calcViaCost(int encoded) const {
     if (encoded >= (LAYER - 1) * N * N) {
         return 0;
     }
-    int layer = encoded / N / N + 1;
+    const int lowerLayer = encoded / N / N;
+    const int upperLayer = lowerLayer + 1;
+    if (!isRoutingLayerEnabled(lowerLayer) || !isRoutingLayerEnabled(upperLayer)) {
+        return INF;
+    }
+    int layer = upperLayer;
     int y = encoded % (N * N) / N;
     int x = encoded % N;
     int upper = layer * N * N + x * N + y;
@@ -204,24 +219,37 @@ void CPURouter::viaSweep(std::vector<int64_t>& map,
                          int x,
                          int y) const {
     const int stride = LAYER * N * N;
-    for (int layer = 1; layer < LAYER; ++layer) {
+    const int firstLayer = std::max(1, routingLayerBegin);
+    const int lastLayer = std::min(LAYER - 1, routingLayerEnd);
+    if (firstLayer > lastLayer) {
+        return;
+    }
+    for (int layer = firstLayer; layer <= lastLayer; ++layer) {
         int cur = layer * N * N + (((layer & 1) ^ DIRECTION) ? x * N + y : y * N + x);
         midScratch[cur] = cur;
     }
-    for (int layer = 2; layer < LAYER; ++layer) {
+    for (int layer = firstLayer + 1; layer <= lastLayer; ++layer) {
         int cur = layer * N * N + (((layer & 1) ^ DIRECTION) ? x * N + y : y * N + x);
         int last = (layer - 1) * N * N + (((layer & 1) ^ DIRECTION) ? y * N + x : x * N + y);
-        if (map[4 * stride + cur] > map[4 * stride + last] + viaCostMap[last]) {
-            map[4 * stride + cur] = map[4 * stride + last] + viaCostMap[last];
+        const int64_t previous = map[4 * stride + last];
+        const int64_t viaCost = viaCostMap[last];
+        const int64_t candidate = previous + viaCost;
+        if (isFinitePatternCost(previous) && viaCost < INF &&
+            candidate < map[4 * stride + cur] && isFinitePatternCost(candidate)) {
+            map[4 * stride + cur] = candidate;
             prev[4 * stride + cur] = prev[4 * stride + last];
             midScratch[cur] = last;
         }
     }
-    for (int layer = LAYER - 2; layer >= 1; --layer) {
+    for (int layer = lastLayer - 1; layer >= firstLayer; --layer) {
         int cur = layer * N * N + (((layer & 1) ^ DIRECTION) ? x * N + y : y * N + x);
         int last = (layer + 1) * N * N + (((layer & 1) ^ DIRECTION) ? y * N + x : x * N + y);
-        if (map[4 * stride + cur] > map[4 * stride + last] + viaCostMap[cur]) {
-            map[4 * stride + cur] = map[4 * stride + last] + viaCostMap[cur];
+        const int64_t previous = map[4 * stride + last];
+        const int64_t viaCost = viaCostMap[cur];
+        const int64_t candidate = previous + viaCost;
+        if (isFinitePatternCost(previous) && viaCost < INF &&
+            candidate < map[4 * stride + cur] && isFinitePatternCost(candidate)) {
+            map[4 * stride + cur] = candidate;
             prev[4 * stride + cur] = prev[4 * stride + last];
             midScratch[cur] = last;
         }
@@ -231,6 +259,11 @@ void CPURouter::viaSweep(std::vector<int64_t>& map,
 void CPURouter::appendWire(std::vector<int>& rawRoute, int from, int to) {
     if (from == to) {
         return;
+    }
+    const int fromLayer = from / N / N;
+    const int toLayer = to / N / N;
+    if (fromLayer != toLayer || !isRoutingLayerEnabled(fromLayer)) {
+        throw std::runtime_error("backend=cpu_pr operation=route generated wire outside GPUGR routing layer range");
     }
     int lo = std::min(from, to);
     int hi = std::max(from, to);
@@ -242,6 +275,10 @@ void CPURouter::appendWire(std::vector<int>& rawRoute, int from, int to) {
 }
 
 void CPURouter::appendVia(std::vector<int>& rawRoute, int encoded) {
+    const int lowerLayer = encoded / N / N;
+    if (!isRoutingLayerEnabled(lowerLayer) || !isRoutingLayerEnabled(lowerLayer + 1)) {
+        throw std::runtime_error("backend=cpu_pr operation=route generated via outside GPUGR routing layer range");
+    }
     rawRoute.push_back(encoded);
     rawRoute.push_back(-1);
     vias[encoded] += 1;
@@ -251,6 +288,13 @@ void CPURouter::routePreparedNet(const std::vector<int>& pointsBuffer, std::vect
     rawRoute.clear();
     rawRoute.push_back(1);
     if (pointsBuffer.size() < 2) {
+        return;
+    }
+
+    const int firstRoutingLayer = std::max(1, routingLayerBegin);
+    const int lastRoutingLayer = std::min(LAYER - 1, routingLayerEnd);
+    if (firstRoutingLayer > lastRoutingLayer) {
+        rawRoute[0] = -1;
         return;
     }
 
@@ -277,7 +321,7 @@ void CPURouter::routePreparedNet(const std::vector<int>& pointsBuffer, std::vect
             int fromy = childPos % N;
             if (fromx != tox && fromy != toy) {
                 for (int a = std::min(fromx, tox); a <= std::max(fromx, tox); ++a) {
-                    for (int layer = 1; layer < LAYER; ++layer) {
+                    for (int layer = firstRoutingLayer; layer <= lastRoutingLayer; ++layer) {
                         if ((layer & 1) ^ DIRECTION) {
                             map[4 * stride + layer * N * N + a * N + toy] = PR_INF;
                             map[4 * stride + layer * N * N + a * N + fromy] = PR_INF;
@@ -288,7 +332,7 @@ void CPURouter::routePreparedNet(const std::vector<int>& pointsBuffer, std::vect
                     }
                 }
                 for (int b = std::min(fromy, toy); b <= std::max(fromy, toy); ++b) {
-                    for (int layer = 1; layer < LAYER; ++layer) {
+                    for (int layer = firstRoutingLayer; layer <= lastRoutingLayer; ++layer) {
                         if ((layer & 1) ^ DIRECTION) {
                             map[4 * stride + layer * N * N + tox * N + b] = PR_INF;
                             map[4 * stride + layer * N * N + fromx * N + b] = PR_INF;
@@ -298,7 +342,7 @@ void CPURouter::routePreparedNet(const std::vector<int>& pointsBuffer, std::vect
                         }
                     }
                 }
-                for (int layer = 1; layer < LAYER; ++layer) {
+                for (int layer = firstRoutingLayer; layer <= lastRoutingLayer; ++layer) {
                     if ((layer & 1) ^ DIRECTION) {
                         int last = layer * N * N + fromx * N + fromy;
                         for (int b = std::min(fromy, toy); b <= std::max(fromy, toy); ++b) {
@@ -333,7 +377,7 @@ void CPURouter::routePreparedNet(const std::vector<int>& pointsBuffer, std::vect
                         viaSweep(map, prev, midScratch, b, fromy);
                     }
                 }
-                for (int layer = 1; layer < LAYER; ++layer) {
+                for (int layer = firstRoutingLayer; layer <= lastRoutingLayer; ++layer) {
                     if ((layer & 1) ^ DIRECTION) {
                         for (int b = std::min(fromx, tox); b <= std::max(fromx, tox); ++b) {
                             int last = layer * N * N + b * N + fromy;
@@ -368,7 +412,7 @@ void CPURouter::routePreparedNet(const std::vector<int>& pointsBuffer, std::vect
                         viaSweep(map, prev, midScratch, b, toy);
                     }
                 }
-                for (int layer = 1; layer < LAYER; ++layer) {
+                for (int layer = firstRoutingLayer; layer <= lastRoutingLayer; ++layer) {
                     if ((layer & 1) ^ DIRECTION) {
                         int cur = layer * N * N + tox * N + toy;
                         for (int b = std::min(fromy, toy); b <= std::max(fromy, toy); ++b) {
@@ -402,7 +446,7 @@ void CPURouter::routePreparedNet(const std::vector<int>& pointsBuffer, std::vect
                     }
                 }
             } else if (fromx == tox) {
-                for (int layer = 1; layer < LAYER; ++layer) {
+                for (int layer = firstRoutingLayer; layer <= lastRoutingLayer; ++layer) {
                     if ((layer & 1) ^ DIRECTION) {
                         int last = layer * N * N + fromx * N + fromy;
                         int cur = layer * N * N + tox * N + toy;
@@ -416,7 +460,7 @@ void CPURouter::routePreparedNet(const std::vector<int>& pointsBuffer, std::vect
                     }
                 }
             } else if (fromy == toy) {
-                for (int layer = 1; layer < LAYER; ++layer) {
+                for (int layer = firstRoutingLayer; layer <= lastRoutingLayer; ++layer) {
                     if (!((layer & 1) ^ DIRECTION)) {
                         int last = layer * N * N + fromy * N + fromx;
                         int cur = layer * N * N + toy * N + tox;
@@ -432,40 +476,50 @@ void CPURouter::routePreparedNet(const std::vector<int>& pointsBuffer, std::vect
             }
         }
 
-        for (int lower = 0; lower < LAYER; ++lower) {
-            int viaSum = 0;
-            int minCost = PR_INT_INF;
+        for (int lower = firstRoutingLayer; lower <= lastRoutingLayer; ++lower) {
+            int64_t viaSum = 0;
+            int64_t minCost = PR_INF;
             int bestpos[3] = {0, 0, 0};
-            int costs[3] = {
-                points[t + 3] == -1 ? 0 : PR_INT_INF,
-                points[t + 4] == -1 ? 0 : PR_INT_INF,
-                points[t + 5] == -1 ? 0 : PR_INT_INF,
+            int64_t costs[3] = {
+                points[t + 3] == -1 ? 0 : PR_INF,
+                points[t + 4] == -1 ? 0 : PR_INF,
+                points[t + 5] == -1 ? 0 : PR_INF,
             };
-            for (int upper = lower; upper < LAYER; ++upper) {
+            for (int upper = lower; upper <= lastRoutingLayer; ++upper) {
                 int idx = upper * N * N + (((upper & 1) ^ DIRECTION) ? tox * N + toy : toy * N + tox);
                 for (int j = 0; j < 3; ++j) {
                     if (points[t + 3 + j] != -1) {
-                        if (map[idx + (j + 1) * stride] < costs[j]) {
-                            costs[j] = static_cast<int>(map[idx + (j + 1) * stride]);
+                        const int64_t childCost = map[idx + (j + 1) * stride];
+                        if (isFinitePatternCost(childCost) && childCost < costs[j]) {
+                            costs[j] = childCost;
                             bestpos[j] = upper;
                         }
                     }
                 }
-                if (1LL * costs[0] + costs[1] + costs[2] < minCost) {
-                    minCost = costs[0] + costs[1] + costs[2];
+                const int64_t candidateCost = costs[0] + costs[1] + costs[2];
+                if (isFinitePatternCost(candidateCost) && candidateCost < minCost) {
+                    minCost = candidateCost;
                 }
-                if (minlayer == -1 || (lower <= minlayer && maxlayer <= upper)) {
+                if (isFinitePatternCost(minCost) &&
+                    (minlayer == -1 || (lower <= minlayer && maxlayer <= upper))) {
                     for (int layer = lower; layer <= upper; ++layer) {
                         int index = layer * N * N + (((layer & 1) ^ DIRECTION) ? tox * N + toy : toy * N + tox);
-                        if (map[index] > minCost + viaSum) {
-                            map[index] = minCost + viaSum;
+                        const int64_t candidate = minCost + viaSum;
+                        if (isFinitePatternCost(candidate) && map[index] > candidate) {
+                            map[index] = candidate;
                             prev[index] =
                                 (((lower * LAYER + upper) * LAYER + bestpos[2]) * LAYER + bestpos[1]) * LAYER +
                                 bestpos[0];
                         }
                     }
                 }
-                viaSum += viaCostMap[idx];
+                if (viaCostMap[idx] >= INF) {
+                    viaSum = PR_INF;
+                } else if (isFinitePatternCost(viaSum + viaCostMap[idx])) {
+                    viaSum += viaCostMap[idx];
+                } else {
+                    viaSum = PR_INF;
+                }
             }
         }
     }
@@ -473,14 +527,14 @@ void CPURouter::routePreparedNet(const std::vector<int>& pointsBuffer, std::vect
     int64_t minTotalDist = PR_INF;
     int rootX = points[0] / N;
     int rootY = points[0] % N;
-    for (int layer = 0; layer < LAYER; ++layer) {
+    for (int layer = firstRoutingLayer; layer <= lastRoutingLayer; ++layer) {
         int idx = layer * N * N + (((layer & 1) ^ DIRECTION) ? rootX * N + rootY : rootY * N + rootX);
         if (map[idx] < minTotalDist) {
             minTotalDist = map[idx];
             map[5 * stride + points[0]] = layer;
         }
     }
-    if (minTotalDist == PR_INF || minTotalDist < 0) {
+    if (!isFinitePatternCost(minTotalDist)) {
         rawRoute[0] = -1;
         return;
     }

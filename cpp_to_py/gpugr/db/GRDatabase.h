@@ -58,6 +58,10 @@ public:
 
     // Design
     int nLayers;
+    // Inclusive indices into the LEF routing-layer stack. Layers outside this
+    // interval remain in the tensors for stable indexing but are unroutable.
+    int routingLayerBegin = 0;
+    int routingLayerEnd = -1;
     int xSize;
     int ySize;
     int nMaxGrid;
@@ -106,6 +110,12 @@ public:
     void setupGrNets();
     void resetGrNetsRoute();
     void resetGrNets() { grNets.clear(); };
+
+    bool isRoutingLayerEnabled(int layer) const {
+        return routingLayerBegin <= layer && layer <= routingLayerEnd;
+    }
+    std::pair<int, int> routingLayerRange() const { return {routingLayerBegin, routingLayerEnd}; }
+    std::vector<std::string> routingLayerNames() const;
 
     std::pair<int, int> reportGRStat();
     void writeGuides(std::string outputFile);
