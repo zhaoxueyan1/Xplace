@@ -12,6 +12,22 @@ constexpr int MAX_ROUTE_LEN_PER_PIN = 160;
 constexpr int INF = 10000000;
 constexpr int MAX_COST = 10000000;
 
+void ensureManagedIntBuffer(int*& buffer, size_t& capacity, size_t required, const char* name) {
+    if (required <= capacity) return;
+    if (required > std::numeric_limits<size_t>::max() / sizeof(int)) {
+        throw std::runtime_error(std::string(name) + " capacity overflows size_t");
+    }
+    int* replacement = nullptr;
+    cudaError_t error = cudaMallocManaged(&replacement, required * sizeof(int));
+    if (error != cudaSuccess) {
+        throw std::runtime_error(
+            std::string("failed to allocate ") + name + ": " + cudaGetErrorString(error));
+    }
+    if (buffer != nullptr) cudaFree(buffer);
+    buffer = replacement;
+    capacity = required;
+}
+
 __host__ __device__ __forceinline__ bool routingLayerEnabled(int layer, int begin, int end) {
     return begin <= layer && layer <= end;
 }
@@ -76,6 +92,10 @@ void GPURouter::initialize(int device_id,
     cudaMalloc(&unitShortCostDiscounted, LAYER * sizeof(float));
     cudaMallocManaged(&allpins, MAX_BATCH_SIZE * MAX_PIN_SIZE_PER_NET * sizeof(int));
     cudaMallocManaged(&batchRouteOffsets, MAX_BATCH_SIZE * sizeof(int64_t));
+    cudaMallocManaged(&batchRouteCapacities, MAX_BATCH_SIZE * sizeof(int64_t));
+    cudaMallocManaged(&batchRouteLengths, MAX_BATCH_SIZE * sizeof(int64_t));
+    cudaMallocManaged(&batchRouteOverflows, MAX_BATCH_SIZE * sizeof(int));
+    cudaMallocManaged(&batchNetIds, MAX_BATCH_SIZE * sizeof(int));
 }
 
 GPURouter::~GPURouter() {
@@ -100,12 +120,17 @@ GPURouter::~GPURouter() {
     cudaFree(unitShortCostDiscounted);
     cudaFree(allpins);
     cudaFree(batchRouteOffsets);
+    cudaFree(batchRouteCapacities);
+    cudaFree(batchRouteLengths);
+    cudaFree(batchRouteOverflows);
+    cudaFree(batchNetIds);
 
     if(pins != nullptr) cudaFree(pins);
     if(pinNum != nullptr) cudaFree(pinNum);
     if(pinNumOffset != nullptr) cudaFree(pinNumOffset);
     if(routes != nullptr) cudaFree(routes);
     if(routesOffset != nullptr) cudaFree(routesOffset);
+    if(routeLengths != nullptr) cudaFree(routeLengths);
     if(isOverflowNet != nullptr) cudaFree(isOverflowNet);
     if(points != nullptr) cudaFree(points);
     if(gbpoints != nullptr) cudaFree(gbpoints);
@@ -459,18 +484,25 @@ __global__ void markOverflowVias(const float *capacity, int *wires, int *vias, f
     isOverflow[idx] = (inCellUsedArea(idx, wires, fixed, N) > capacity[idx] || inCellUsedArea(upper_idx, wires, fixed, N) > capacity[upper_idx]);
 }
 
-__global__ void markOverflowNets(int *isOverflowVia, int *isOverflowWire, int *isOverflowNet, int *routes, int64_t *routesOffset, int NET_NUM) {
+__global__ void markOverflowNets(int *isOverflowVia,
+                                 int *isOverflowWire,
+                                 int *isOverflowNet,
+                                 int *routes,
+                                 int64_t *routesOffset,
+                                 int64_t *routeLengths,
+                                 int NET_NUM) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if(idx >= NET_NUM) return;
     routes += routesOffset[idx];
     isOverflowNet[idx] = 0;
-    if(routes[0] == -1) {
+    const int64_t routeLength = routeLengths[idx];
+    if(routeLength < 0) {
         // printf("resolving failed net from pattern routing. netId: %d\n", idx);
         isOverflowNet[idx] = 1;
         return;
     }
-    //if(routes[0] == 0) return;
-    for(int i = 1; i < routes[0]; i += 2) if(routes[i + 1] == -1) {
+    if (routeLength == 0) return;
+    for(int64_t i = 1; i < routeLength; i += 2) if(routes[i + 1] == -1) {
         if(isOverflowVia[routes[i]]) {
             isOverflowNet[idx] = 1;
             return;
@@ -484,27 +516,41 @@ __global__ void markOverflowNets(int *isOverflowVia, int *isOverflowWire, int *i
     }
 }
 
-__global__ void commit(int *routes, int64_t *routesOffset, int *wires, int *vias, int NET_NUM) {
+__global__ void commit(int *routes,
+                       int64_t *routesOffset,
+                       int64_t *routeLengths,
+                       int *wires,
+                       int *vias,
+                       int NET_NUM) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if(idx >= NET_NUM) return;
     routes += routesOffset[idx];
-    for(int i = 1; i < routes[0]; i += 2) if(routes[i + 1] > 0) {
+    const int64_t routeLength = routeLengths[idx];
+    for(int64_t i = 1; i < routeLength; i += 2) if(routes[i + 1] > 0) {
         for(int j = 0; j < routes[i + 1]; j++)
             atomicAdd(wires + routes[i] + j, 1);
     } else
         atomicAdd(vias + routes[i], 1);
 }
 
-__global__ void ripupOverflowNets(int *isOverflowNet, int *routes, int64_t *routesOffset, int *wires, int *vias, int NET_NUM) {
+__global__ void ripupOverflowNets(int *isOverflowNet,
+                                  int *routes,
+                                  int64_t *routesOffset,
+                                  int64_t *routeLengths,
+                                  int *wires,
+                                  int *vias,
+                                  int NET_NUM) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if(idx >= NET_NUM || isOverflowNet[idx] == 0) return;
     routes += routesOffset[idx];
-    for(int i = 1; i < routes[0]; i += 2) if(routes[i + 1] > 0) {
+    const int64_t routeLength = routeLengths[idx];
+    for(int64_t i = 1; i < routeLength; i += 2) if(routes[i + 1] > 0) {
         for(int j = 0; j < routes[i + 1]; j++)
             atomicAdd(wires + routes[i] + j, -1);
     } else
         atomicAdd(vias + routes[i], -1);
     routes[0] = 1;
+    routeLengths[idx] = 1;
 }
 
 __global__ void getWires(int N, int LAYER, int *wires, int *ids) {
@@ -668,7 +714,8 @@ void GPURouter::route(std::vector<GrNet> &nets, int iter) {
     std::vector<int> netsToRoute;
     if(iter > 0) {
         logger.info("Maze Routing...");
-        ripupOverflowNets<<<BLOCK_NUMBER(NET_NUM), BLOCK_SIZE>>> (isOverflowNet, routes, routesOffset, wires, vias, NET_NUM);
+        ripupOverflowNets<<<BLOCK_NUMBER(NET_NUM), BLOCK_SIZE>>>(
+            isOverflowNet, routes, routesOffset, routeLengths, wires, vias, NET_NUM);
         cudaDeviceSynchronize();
         for(size_t netId = 0; netId < nets.size(); netId++) 
             if(isOverflowNet[netId] && !nets[netId].noroute) {
@@ -936,12 +983,31 @@ void GPURouter::route(std::vector<GrNet> &nets, int iter) {
                                                                               routingLayerEnd);
         calculateCostSum<<<N, N / 2, N * sizeof(int64_t)>>> (LAYER, N, cost, costSum);
         if(iter == 0) {
+            size_t requiredPoints = static_cast<size_t>(batchSize);
+            size_t requiredGbpoints = static_cast<size_t>(batchSize);
+            for (int i = 0; i < batchSize; ++i) {
+                const size_t pinCount = nets[netsToRoute[startpos + i]].getPins().size();
+                if (pinCount > (std::numeric_limits<size_t>::max() - 2) / 12) {
+                    throw std::runtime_error("GPU pattern-routing points size overflows size_t");
+                }
+                const size_t pointBound = 2 + 12 * pinCount;
+                if (requiredPoints > std::numeric_limits<size_t>::max() - pointBound ||
+                    requiredGbpoints > std::numeric_limits<size_t>::max() - 2 * pinCount) {
+                    throw std::runtime_error("GPU pattern-routing batch buffer size overflows size_t");
+                }
+                requiredPoints += pointBound;
+                requiredGbpoints += 2 * pinCount;
+            }
+            if (requiredPoints > static_cast<size_t>(std::numeric_limits<int>::max()) ||
+                requiredGbpoints > static_cast<size_t>(std::numeric_limits<int>::max())) {
+                throw std::runtime_error(
+                    "GPU pattern-routing batch exceeds int-indexable points buffer; reduce batch size");
+            }
+            ensureManagedIntBuffer(points, pointsCapacity, requiredPoints, "pattern points buffer");
+            ensureManagedIntBuffer(
+                gbpoints, gbpointsCapacity, requiredGbpoints, "pattern gbpoints buffer");
             int offset = batchSize;
             int gbPinOffset = batchSize;
-            if(points == nullptr) {
-                cudaMallocManaged(&points, 20000000 * sizeof(int));
-                cudaMallocManaged(&gbpoints, 10000000 * sizeof(int));
-            }
             // double prepare_part_time = 0;
             double prepare_detailed_time = 0;
             double t = clock();
@@ -954,10 +1020,32 @@ void GPURouter::route(std::vector<GrNet> &nets, int iter) {
                 points[i] = offset;
                 gbpoints[i] = gbPinOffset;
                 batchRouteOffsets[i] = routesOffsetCPU[netId];
-                offset += prepare(prepare_detailed_time, nets[netId], points + offset, 0, gbpoints + gbPinOffset, gbPinOffset, X, Y, N, LAYER, DIRECTION);
+                batchRouteCapacities[i] = routesOffsetCPU[netId + 1] - routesOffsetCPU[netId];
+                batchRouteLengths[i] = 1;
+                batchRouteOverflows[i] = 0;
+                const int prepared = prepare(prepare_detailed_time,
+                                             nets[netId],
+                                             points + offset,
+                                             0,
+                                             gbpoints + gbPinOffset,
+                                             gbPinOffset,
+                                             pointsCapacity - static_cast<size_t>(offset),
+                                             gbpointsCapacity - static_cast<size_t>(gbPinOffset),
+                                             X,
+                                             Y,
+                                             N,
+                                             LAYER,
+                                             DIRECTION);
+                if (prepared < 0 || static_cast<size_t>(offset) + static_cast<size_t>(prepared) > pointsCapacity ||
+                    static_cast<size_t>(gbPinOffset) > gbpointsCapacity) {
+                    throw std::runtime_error("GPU pattern-routing prepare exceeded batch buffer capacity");
+                }
+                offset += prepared;
             }
-            if(offset > 20000000 || gbPinOffset > 10000000)
-                logger.error("ERROR offset %d %d", offset, gbPinOffset);
+            if (static_cast<size_t>(offset) > pointsCapacity ||
+                static_cast<size_t>(gbPinOffset) > gbpointsCapacity) {
+                throw std::runtime_error("GPU pattern-routing batch buffer capacity check failed");
+            }
             timer2 += prepare_detailed_time;
             prpreparetime += clock() - t;
             t = clock();
@@ -972,6 +1060,9 @@ void GPURouter::route(std::vector<GrNet> &nets, int iter) {
                          vias,
                          routes,
                          batchRouteOffsets,
+                         batchRouteCapacities,
+                         batchRouteLengths,
+                         batchRouteOverflows,
                          gbpoints,
                          gbpinRoutes,
                          X,
@@ -981,6 +1072,19 @@ void GPURouter::route(std::vector<GrNet> &nets, int iter) {
                          DIRECTION,
                          routingLayerBegin,
                          routingLayerEnd);
+
+            for (int i = 0; i < batchSize; ++i) {
+                routeLengths[netsToRoute[startpos + i]] = batchRouteLengths[i];
+            }
+            for (int i = 0; i < batchSize; ++i) {
+                if (batchRouteOverflows[i] != 0) {
+                    const int netId = netsToRoute[startpos + i];
+                    throw std::runtime_error(
+                        "GPU pattern-routing route buffer capacity exceeded for net " +
+                        std::to_string(netId) + " (capacity " +
+                        std::to_string(batchRouteCapacities[i]) + ")");
+                }
+            }
             
             prtime += clock() - t;
         } else {
@@ -1021,6 +1125,7 @@ void GPURouter::route(std::vector<GrNet> &nets, int iter) {
             int pin10 = 0;
             for(int i = 0; i < batchSize; i++) {
                 int netId = netsToRoute[startpos + i], cur = 0, *pins = allpins + i * MAX_PIN_SIZE_PER_NET;
+                batchNetIds[i] = netId;
                 auto& vec = nets[netId].getPins();
                 pins[cur++] = routesOffsetCPU[netId];
                 pins[cur++] = vec.size();
@@ -1043,8 +1148,33 @@ void GPURouter::route(std::vector<GrNet> &nets, int iter) {
             initMap<<<BLOCK_NUMBER(batchSize * LAYER * N * N), BLOCK_SIZE>>> (dist, prev, N * N * LAYER, batchSize * N * N * LAYER);
             setStartCells<<<batchSize, 1>>> (dist, allpins, MAX_PIN_SIZE_PER_NET, N * N * LAYER);
             double t = clock();
-            gpuMR.getResults(costtime, costSum, allpins, dist, prev, cost, viaCost, wires, vias, routes, N, COARSENING_SCALE, DIRECTION, batchSize, netsToRoute[startpos]);
+            gpuMR.getResults(costtime,
+                             costSum,
+                             allpins,
+                             dist,
+                             prev,
+                             cost,
+                             viaCost,
+                             wires,
+                             vias,
+                             routes,
+                             N,
+                             COARSENING_SCALE,
+                             DIRECTION,
+                             batchSize,
+                             netsToRoute[startpos],
+                             batchNetIds,
+                             routeLengths,
+                             routesOffsetCPU);
             cudaDeviceSynchronize();
+            for (int i = 0; i < batchSize; ++i) {
+                const int netId = batchNetIds[i];
+                if (routeLengths[netId] < 0) {
+                    throw std::runtime_error(
+                        "GPU maze-routing route buffer capacity exceeded for net " +
+                        std::to_string(netId));
+                }
+            }
             mrtime += (clock() - t) * 1.0 / CLOCKS_PER_SEC;
         }
         //std::cerr << "pins: " << sumofpins << ' ' << 1.0 * sumofpins / netsToRoute.size() << std::endl;
@@ -1064,7 +1194,8 @@ void GPURouter::route(std::vector<GrNet> &nets, int iter) {
     if(1) {
         markOverflowWires<<<BLOCK_NUMBER(LAYER * N * N), BLOCK_SIZE>>> (capacity, wires, vias, fixed, isOverflowWire, N, LAYER);
         markOverflowVias<<<BLOCK_NUMBER((LAYER - 1) * N * N), BLOCK_SIZE>>> (capacity, wires, vias, fixed, isOverflowVia, N, LAYER);
-        markOverflowNets<<<BLOCK_NUMBER(NET_NUM), BLOCK_SIZE>>> (isOverflowVia, isOverflowWire, isOverflowNet, routes, routesOffset, NET_NUM);
+        markOverflowNets<<<BLOCK_NUMBER(NET_NUM), BLOCK_SIZE>>>(
+            isOverflowVia, isOverflowWire, isOverflowNet, routes, routesOffset, routeLengths, NET_NUM);
         cudaDeviceSynchronize();
         int cnt = 0;
         for(size_t netId = 0; netId < nets.size(); netId++) 
@@ -1093,6 +1224,8 @@ void GPURouter::setFromNets(std::vector<GrNet> &nets, int numPlPin_) {
     }
     const size_t totalRouteBytes = static_cast<size_t>(totalRouteInts) * sizeof(int);
     cudaMallocManaged(&isOverflowNet, NET_NUM * sizeof(int));
+    cudaMallocManaged(&routeLengths, NET_NUM * sizeof(int64_t));
+    cudaMemset(routeLengths, 0, NET_NUM * sizeof(int64_t));
     cudaError_t routeAllocError = cudaMalloc(&routes, totalRouteBytes);
     if (routeAllocError != cudaSuccess) {
         throw std::runtime_error(
@@ -1145,12 +1278,18 @@ void GPURouter::setToNets(std::vector<GrNet> &nets) {
     for(size_t netId = 0; netId < nets.size(); netId++) {
         std::vector<int> wires, vias;
         int *routesSub = routesCPU + routesOffsetCPU[netId];
-        mx = std::max(mx, routesSub[0] / pinNumCPU[netId]);
-        if(routesSub[0] > routesOffsetCPU[netId + 1] - routesOffsetCPU[netId]) {
+        const int64_t usedLength = routeLengths[netId];
+        if (usedLength < 0) {
+            throw std::runtime_error("GPU route buffer contains a failed net " + std::to_string(netId));
+        }
+        const int64_t boundedLength = std::min(
+            usedLength, routesOffsetCPU[netId + 1] - routesOffsetCPU[netId]);
+        mx = std::max(mx, static_cast<int>(boundedLength / std::max(1, pinNumCPU[netId])));
+        if(usedLength > routesOffsetCPU[netId + 1] - routesOffsetCPU[netId]) {
             num_net_use_too_many_route++;
             // std::cerr << "ERROR: too many routesSub! Please set MAX_ROUTE_LEN_PER_PIN larger than " << routesSub[0] / pinNumCPU[netId] << std::endl;
         }
-        for(int i = 1; i < routesSub[0]; i += 2) {
+        for(int64_t i = 1; i < boundedLength; i += 2) {
             const int lowerLayer = routesSub[i] / N / N;
             if (routesSub[i + 1] > 0) {
                 const int upperPoint = routesSub[i] + routesSub[i + 1] - 1;
@@ -1205,10 +1344,14 @@ std::vector<std::vector<int>> GPURouter::getRawRoutes() {
     for (int netId = 0; netId < NET_NUM; netId++) {
         int64_t begin = routesOffsetCPU[netId];
         int64_t end = routesOffsetCPU[netId + 1];
-        int usedLen = routesCPU[begin];
+        const int64_t usedLength = routeLengths[netId];
         int64_t copyLen = 1;
-        if (usedLen > 0) {
-            copyLen = std::min(end - begin, static_cast<int64_t>(usedLen));
+        if (usedLength < 0) {
+            rawRoutes.emplace_back(std::initializer_list<int>{-1});
+            continue;
+        }
+        if (usedLength > 0) {
+            copyLen = std::min(end - begin, usedLength);
         }
         rawRoutes.emplace_back(routesCPU + begin, routesCPU + begin + copyLen);
     }

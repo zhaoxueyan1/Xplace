@@ -772,6 +772,8 @@ void CPURouter::route(std::vector<GrNet>& nets) {
                               routeOffsets[netId],
                               gbpoints.data(),
                               gbPinOffset,
+                              points.size(),
+                              gbpoints.size(),
                               X,
                               Y,
                               N,

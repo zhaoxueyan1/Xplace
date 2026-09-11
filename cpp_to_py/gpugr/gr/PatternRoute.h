@@ -1,4 +1,6 @@
 #pragma once
+#include <cstddef>
+
 #include "common/common.h"
 #include "gpugr/db/GrNet.h"
 
@@ -10,6 +12,8 @@ int prepare(double &count,
             int routesOffset,
             int *gbpoints,
             int &gbPinOffset,
+            size_t pointsCapacity,
+            size_t gbpointsCapacity,
             int X,
             int Y,
             int N,
@@ -40,6 +44,9 @@ void patternRoute(int *points,
                   int *vias,
                   int *routes,
                   int64_t *batchRouteOffsets,
+                  int64_t *batchRouteCapacities,
+                  int64_t *batchRouteLengths,
+                  int *batchRouteOverflows,
                   int *gbpoints,
                   int *gbpinRoutes,
                   int X,

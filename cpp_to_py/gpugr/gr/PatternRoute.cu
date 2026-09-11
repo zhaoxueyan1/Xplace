@@ -1,5 +1,7 @@
 #include <iostream>
 #include <map>
+#include <climits>
+#include <stdexcept>
 
 #include "PatternRoute.h"
 
@@ -13,6 +15,38 @@ constexpr int64_t PR_FINITE_LIMIT = PR_INF / 2;
 
 __device__ __forceinline__ bool isFinitePatternCost(int64_t value) {
     return value >= 0 && value < PR_FINITE_LIMIT;
+}
+
+// Route payloads use int coordinates, but the per-net cursor is tracked in
+// 64 bits so a malformed/oversized net cannot wrap before the capacity check.
+__device__ __forceinline__ bool appendPatternRoute(int* routes,
+                                                   int64_t* routeLength,
+                                                   int64_t routeCapacity,
+                                                   int* routeOverflow,
+                                                   int value) {
+    const int64_t cursor = *routeLength;
+    if (cursor < 1 || cursor >= routeCapacity || cursor >= static_cast<int64_t>(INT_MAX)) {
+        *routeLength = -1;
+        routes[0] = -1;
+        if (routeOverflow != nullptr) *routeOverflow = 1;
+        return false;
+    }
+    routes[cursor] = value;
+    *routeLength = cursor + 1;
+    routes[0] = static_cast<int>(*routeLength);
+    return true;
+}
+
+__device__ __forceinline__ void appendGbpinRoute(int* gbpinRoutes, int gbpinId, int routeId) {
+    if (gbpinId < 0) return;
+    const int base = gbpinId * 6;
+    const int count = gbpinRoutes[base];
+    if (count >= 4) {
+        printf("Error: too many routes for gbpin %d\n", gbpinId);
+        return;
+    }
+    gbpinRoutes[base + 1 + count] = routeId;
+    gbpinRoutes[base] = count + 1;
 }
 
 __global__ void initMap(int *map) { map[blockIdx.x * blockDim.x + threadIdx.x] = INF; }
@@ -644,6 +678,9 @@ __global__ void cudaPatternRouteParallel(int64_t *map,
                                          int *vias,
                                          int *routes,
                                          const int64_t *routeOffsets,
+                                         const int64_t *routeCapacities,
+                                         int64_t *routeLengths,
+                                         int *routeOverflows,
                                          int *gbpoints,
                                          int *gbpinRoutes,
                                          int LAYER,
@@ -655,8 +692,20 @@ __global__ void cudaPatternRouteParallel(int64_t *map,
     gbpoints += gbpoints[blockIdx.x];
     points += points[blockIdx.x];
     routes += routeOffsets[blockIdx.x];
-    if (threadIdx.x == 0) routes[0] = 1;
+    int64_t* routeLength = routeLengths + blockIdx.x;
+    const int64_t routeCapacity = routeCapacities[blockIdx.x];
+    if (threadIdx.x == 0) {
+        *routeLength = 1;
+        if (routeOverflows != nullptr) routeOverflows[blockIdx.x] = 0;
+        routes[0] = 1;
+        if (routeCapacity <= 1) {
+            *routeLength = -1;
+            routes[0] = -1;
+            if (routeOverflows != nullptr) routeOverflows[blockIdx.x] = 1;
+        }
+    }
     __syncthreads();
+    if (*routeLength < 0) return;
     const int firstLayer = max(1, routingLayerBegin);
     const int lastLayer = min(LAYER - 1, routingLayerEnd);
     if (firstLayer > lastLayer) {
@@ -933,6 +982,7 @@ __global__ void cudaPatternRouteParallel(int64_t *map,
                    node_cnt,
                    points[0],
                    (long long)minTotalDist);
+            *routeLength = -1;
             routes[0] = -1;
             // printf("routes[0] = %d\n", points[-2]);
             // return;
@@ -946,8 +996,8 @@ __global__ void cudaPatternRouteParallel(int64_t *map,
                     maxlayer = prev[idx] / LAYER / LAYER / LAYER % LAYER;
                 for (int i = minlayer; i < maxlayer; i++) {
                     int id = i * N * N + (((i & 1) ^ DIRECTION) ? x * N + y : y * N + x);
-                    routes[routes[0]++] = id;
-                    routes[routes[0]++] = -1;
+                    appendPatternRoute(routes, routeLength, routeCapacity, routeOverflows, id);
+                    appendPatternRoute(routes, routeLength, routeCapacity, routeOverflows, -1);
                     vias[id]++;
                 }
                 // Assign #vias to gbpinRoutes
@@ -984,16 +1034,21 @@ __global__ void cudaPatternRouteParallel(int64_t *map,
                             if (entry_routeId == -1) entry_routeId = encodeId;
                             last_routeId = encodeId;
 
-                            routes[routes[0]++] = min(entry, p1);
-                            routes[routes[0]++] = max(entry, p1) - min(entry, p1);
+                            appendPatternRoute(
+                                routes, routeLength, routeCapacity, routeOverflows, min(entry, p1));
+                            appendPatternRoute(routes,
+                                               routeLength,
+                                               routeCapacity,
+                                               routeOverflows,
+                                               max(entry, p1) - min(entry, p1));
                             for (int i = min(entry, p1); i < max(entry, p1); i++) wires[i]++;
                             // atomicAdd(wires + i, 1);
                         }
                         if (p1 != mid) {
                             for (int i = min(entrylayer, midlayer); i < max(entrylayer, midlayer); i++) {
                                 int id = i * N * N + (((i & 1) ^ DIRECTION) ? midx * N + midy : midy * N + midx);
-                                routes[routes[0]++] = id;
-                                routes[routes[0]++] = -1;
+                                appendPatternRoute(routes, routeLength, routeCapacity, routeOverflows, id);
+                                appendPatternRoute(routes, routeLength, routeCapacity, routeOverflows, -1);
                                 vias[id]++;
                                 // atomicAdd(vias + id, 1);
                             }
@@ -1003,8 +1058,13 @@ __global__ void cudaPatternRouteParallel(int64_t *map,
                             if (entry_routeId == -1) entry_routeId = encodeId;
                             last_routeId = encodeId;
 
-                            routes[routes[0]++] = min(mid, p3);
-                            routes[routes[0]++] = max(mid, p3) - min(mid, p3);
+                            appendPatternRoute(
+                                routes, routeLength, routeCapacity, routeOverflows, min(mid, p3));
+                            appendPatternRoute(routes,
+                                               routeLength,
+                                               routeCapacity,
+                                               routeOverflows,
+                                               max(mid, p3) - min(mid, p3));
 
                             for (int i = min(mid, p3); i < max(mid, p3); i++) wires[i]++;
                             // atomicAdd(wires + i, 1);
@@ -1014,8 +1074,8 @@ __global__ void cudaPatternRouteParallel(int64_t *map,
                             if (!(p3 / N / N & 1) ^ DIRECTION) cudaSwap(tempx, tempy);
                             for (int i = min(midlayer, lastlayer); i < max(midlayer, lastlayer); i++) {
                                 int id = i * N * N + (((i & 1) ^ DIRECTION) ? tempx * N + tempy : tempy * N + tempx);
-                                routes[routes[0]++] = id;
-                                routes[routes[0]++] = -1;
+                                appendPatternRoute(routes, routeLength, routeCapacity, routeOverflows, id);
+                                appendPatternRoute(routes, routeLength, routeCapacity, routeOverflows, -1);
                                 vias[id]++;
                                 // atomicAdd(vias + id, 1);
                             }
@@ -1025,8 +1085,13 @@ __global__ void cudaPatternRouteParallel(int64_t *map,
                             if (entry_routeId == -1) entry_routeId = encodeId;
                             last_routeId = encodeId;
 
-                            routes[routes[0]++] = min(p4, last);
-                            routes[routes[0]++] = max(p4, last) - min(p4, last);
+                            appendPatternRoute(
+                                routes, routeLength, routeCapacity, routeOverflows, min(p4, last));
+                            appendPatternRoute(routes,
+                                               routeLength,
+                                               routeCapacity,
+                                               routeOverflows,
+                                               max(p4, last) - min(p4, last));
                             for (int i = min(p4, last); i < max(p4, last); i++) wires[i]++;
                             // atomicAdd(wires + i, 1);
                         }
@@ -1036,30 +1101,23 @@ __global__ void cudaPatternRouteParallel(int64_t *map,
                         if (entry_routeId == -1) entry_routeId = encodeId;
                         last_routeId = encodeId;
 
-                        routes[routes[0]++] = min(last, entry);
-                        routes[routes[0]++] = max(last, entry) - min(last, entry);
+                        appendPatternRoute(
+                            routes, routeLength, routeCapacity, routeOverflows, min(last, entry));
+                        appendPatternRoute(routes,
+                                           routeLength,
+                                           routeCapacity,
+                                           routeOverflows,
+                                           max(last, entry) - min(last, entry));
                         for (int i = min(last, entry); i < max(last, entry); i++) wires[i]++;
                         // atomicAdd(wires + i, 1);
                     }
                     map[5 * LAYER * N * N + child] = lastlayer;
 
                     // Assign entry/last route to gbpinRoutes
-                    if (t_gbPinId != -1) {
-                        gbpinRoutes[t_gbPinId * 6 + 1 + gbpinRoutes[t_gbPinId * 6]] = entry_routeId;
-                        gbpinRoutes[t_gbPinId * 6]++;
-                        if (gbpinRoutes[t_gbPinId * 6] > 4) {
-                            printf("Error: numRoutes for t_gbpin d%d\n", gbpinRoutes[t_gbPinId * 6]);
-                        }
-                    }
+                    appendGbpinRoute(gbpinRoutes, t_gbPinId, entry_routeId);
                     int c_gbPinId = gbpoints[points[t + 3 + j] / 6];
-                    if (c_gbPinId != -1) {
-                        // negative routeId to refer the last route
-                        gbpinRoutes[c_gbPinId * 6 + 1 + gbpinRoutes[c_gbPinId * 6]] = -1 * last_routeId;
-                        gbpinRoutes[c_gbPinId * 6]++;
-                        if (gbpinRoutes[c_gbPinId * 6] > 4) {
-                            printf("Error: numRoutes for c_gbpin %d\n", gbpinRoutes[c_gbPinId * 6]);
-                        }
-                    }
+                    // negative routeId to refer the last route
+                    appendGbpinRoute(gbpinRoutes, c_gbPinId, -1 * last_routeId);
                 }
             }
         }
@@ -1288,6 +1346,9 @@ void patternRoute(int *points,
                   int *vias,
                   int *routes,
                   int64_t *batchRouteOffsets,
+                  int64_t *batchRouteCapacities,
+                  int64_t *batchRouteLengths,
+                  int *batchRouteOverflows,
                   int *gbpoints,
                   int *gbpinRoutes,
                   int X,
@@ -1319,6 +1380,9 @@ void patternRoute(int *points,
         vias,
         routes,
         batchRouteOffsets,
+        batchRouteCapacities,
+        batchRouteLengths,
+        batchRouteOverflows,
         gbpoints,
         gbpinRoutes,
         LAYER,
@@ -1330,11 +1394,12 @@ void patternRoute(int *points,
     // cudaPatternRoute<<<batchSize, LAYER>>> (map, points, wireCostSum, viaCost, prev, wires, vias, routes, LAYER, N,
     // DIRECTION);
     {
-        cudaDeviceSynchronize();
-        int errorType = cudaGetLastError();
-        if (errorType) {
-            std::cerr << "PR1 CUDA ERROR: " << errorType << std::endl;
-            exit(0);
+        const cudaError_t syncError = cudaDeviceSynchronize();
+        const cudaError_t launchError = cudaGetLastError();
+        const cudaError_t errorType = syncError != cudaSuccess ? syncError : launchError;
+        if (errorType != cudaSuccess) {
+            throw std::runtime_error(
+                std::string("PR1 CUDA error: ") + cudaGetErrorString(errorType));
         }
     }
     // exit(0);

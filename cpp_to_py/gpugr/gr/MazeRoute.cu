@@ -1,4 +1,5 @@
 #include <gpugr/taskflow/cudaflow.hpp>
+#include <climits>
 
 #include "MazeRoute.h"
 
@@ -593,6 +594,24 @@ __device__ void inline cudaSwap(T &a, T &b) {
     a = b;
     b = c;
 }
+
+__device__ __forceinline__ bool appendMazeRoute(int *routes,
+                                                int64_t *routeLength,
+                                                int64_t routeCapacity,
+                                                int *routeOverflow,
+                                                int value) {
+    const int64_t cursor = *routeLength;
+    if (cursor < 1 || cursor >= routeCapacity || cursor >= static_cast<int64_t>(INT_MAX)) {
+        *routeLength = -1;
+        routes[0] = -1;
+        if (routeOverflow != nullptr) *routeOverflow = 1;
+        return false;
+    }
+    routes[cursor] = value;
+    *routeLength = cursor + 1;
+    routes[0] = static_cast<int>(*routeLength);
+    return true;
+}
 __global__ void routeFG(int64_t *costSum,
                         int *pins,
                         int *mark,
@@ -610,7 +629,10 @@ __global__ void routeFG(int64_t *costSum,
                         int N,
                         int DIRECTION,
                         int routingLayerBegin,
-                        int routingLayerEnd) {
+                        int routingLayerEnd,
+                        int64_t *routeLength,
+                        int64_t routeCapacity,
+                        int *routeOverflow) {
     extern __shared__ int shared[];
     int *localDist = shared, *localPrev = localDist + LAYER * SCALE * SCALE,
         *localWireCost = localPrev + LAYER * SCALE * SCALE, *localViaCost = localWireCost + LAYER * SCALE * SCALE;
@@ -841,12 +863,14 @@ __global__ void routeFG(int64_t *costSum,
             int minp = min(p, pp), maxp = max(p, pp);
             // if(routes[0] >= 999)
             //     printf("ERROR!!!\n");
-            if (p / N / N != pp / N / N)
-                routes[routes[0]++] = minp, routes[routes[0]++] = -1, atomicAdd(vias + minp, 1);
-            else {
+            if (p / N / N != pp / N / N) {
+                if (appendMazeRoute(routes, routeLength, routeCapacity, routeOverflow, minp) &&
+                    appendMazeRoute(routes, routeLength, routeCapacity, routeOverflow, -1)) {
+                    atomicAdd(vias + minp, 1);
+                }
+            } else {
                 // test<<<1, maxp - minp>>> (minp, pp - minp, wires, prev, dist);
                 // cudaDeviceSynchronize();
-                for (int i = min(p, pp); i < max(p, pp); i++) atomicAdd(wires + i, 1);
                 // prev[p] = p;
                 // dist[p] = 0;
                 for (int i = min(p, pp); i <= max(p, pp); i++)
@@ -858,7 +882,9 @@ __global__ void routeFG(int64_t *costSum,
                 // else if(routes[0] >= 3 && routes[routes[0] - 1] != -1 && routes[routes[0] - 2] - 1 == min(p, pp))
                 //     routes[routes[0] - 2]--, routes[routes[0] - 1]++;
                 // else
-                routes[routes[0]++] = min(p, pp), routes[routes[0]++] = maxp - minp;
+                if (appendMazeRoute(routes, routeLength, routeCapacity, routeOverflow, min(p, pp)) &&
+                    appendMazeRoute(routes, routeLength, routeCapacity, routeOverflow, maxp - minp))
+                    for (int i = min(p, pp); i < max(p, pp); i++) atomicAdd(wires + i, 1);
             }
             p = pp;
         }
@@ -904,7 +930,24 @@ void GPUMazeRouter::run(int DIRECTION, int iterleft) {
     }
 }
 
-void GPUMazeRouter::getResults(double &time_cnt, int64_t *costSum, int *pins, int *dist, int *fgprev, int *wireCost, int *viaCost, int *wires, int *vias, int *routes, int N, int SCALE, int DIRECTION, int batchSize, int netId) {  
+void GPUMazeRouter::getResults(double &time_cnt,
+                               int64_t *costSum,
+                               int *pins,
+                               int *dist,
+                               int *fgprev,
+                               int *wireCost,
+                               int *viaCost,
+                               int *wires,
+                               int *vias,
+                               int *routes,
+                               int N,
+                               int SCALE,
+                               int DIRECTION,
+                               int batchSize,
+                               int netId,
+                               int *batchNetIds,
+                               int64_t *routeLengths,
+                               const int64_t *routeOffsets) {
     DDEBUG = netId;
     /*printf("Pin Number: %d\n", pins[1]);
     printf("Coarse-Grained:\n");
@@ -963,7 +1006,7 @@ void GPUMazeRouter::getResults(double &time_cnt, int64_t *costSum, int *pins, in
                             sweepud[iter * MAX_TURN_NUM + turn] = flow[i * LOG + d].kernel(blockUD, (X + 1) / 2, 4 * X * sizeof(int), sweepUD, costL, costR, map + i * LAYER * X * Y, prev + i * LAYER * X * Y, 1 + (DIRECTION == 0), X, Y).succeed(minall[iter * MAX_TURN_NUM + turn]);
                         }        
                         path[iter] = flow[i * LOG + d].kernel(1, 1, 0, Path, map + i * LAYER * X * Y, pins + i * MAX_PIN_SIZE_PER_NET + 1, routedPin + i * MAX_PIN_NUM, prev + i * LAYER * X * Y, mark + i * MAX_PIN_NUM * 10, LAYER, X, Y, N, DIRECTION, SCALE).name("path" + std::to_string(d)).succeed(sweeplr[(iter + 1) * MAX_TURN_NUM - 1]).succeed(sweepud[(iter + 1) * MAX_TURN_NUM - 1]);
-                        fgroute[iter] = flow[i * LOG + d].kernel(1, SCALE * SCALE, 4 * LAYER * SCALE * SCALE * sizeof(int), routeFG, costSum, pins + i * MAX_PIN_SIZE_PER_NET + 1, mark + i * MAX_PIN_NUM * 10, dist + i * LAYER * N * N, fgprev + i * LAYER * N * N, wireCost, viaCost, wires, vias, routes, LAYER, SCALE, X, Y, N, DIRECTION, routingLayerBegin, routingLayerEnd).name("fgroute" + std::to_string(d)).succeed(path[iter]);
+                        fgroute[iter] = flow[i * LOG + d].kernel(1, SCALE * SCALE, 4 * LAYER * SCALE * SCALE * sizeof(int), routeFG, costSum, pins + i * MAX_PIN_SIZE_PER_NET + 1, mark + i * MAX_PIN_NUM * 10, dist + i * LAYER * N * N, fgprev + i * LAYER * N * N, wireCost, viaCost, wires, vias, routes, LAYER, SCALE, X, Y, N, DIRECTION, routingLayerBegin, routingLayerEnd, routeLengths + batchNetIds[i], routeOffsets[batchNetIds[i] + 1] - routeOffsets[batchNetIds[i]], nullptr).name("fgroute" + std::to_string(d)).succeed(path[iter]);
                     }
                     flow[i * LOG + d].instantiate();
                 }
@@ -1020,7 +1063,10 @@ void GPUMazeRouter::getResults(double &time_cnt, int64_t *costSum, int *pins, in
                     sweepUD<<<blockUD, X, 4 * X * sizeof(int), streams[net]>>> (costL, costR, map, prev, 1 + (DIRECTION == 0), X, Y);
                 }
                 Path<<<1, 1, 0, streams[net]>>> (map, pins + 1, routedPin, prev, mark, LAYER, X, Y, N, DIRECTION, SCALE);
-                routeFG<<<1, SCALE * SCALE, 4 * LAYER * SCALE * SCALE * sizeof(int), streams[net]>>> (costSum, pins + 1, mark, dist, fgprev, wireCost, viaCost, wires, vias, routes, LAYER, SCALE, X, Y, N, DIRECTION, routingLayerBegin, routingLayerEnd);
+                routeFG<<<1, SCALE * SCALE, 4 * LAYER * SCALE * SCALE * sizeof(int), streams[net]>>> (costSum,
+                    pins + 1, mark, dist, fgprev, wireCost, viaCost, wires, vias, routes, LAYER, SCALE, X, Y, N,
+                    DIRECTION, routingLayerBegin, routingLayerEnd, routeLengths + batchNetIds[net],
+                    routeOffsets[batchNetIds[net] + 1] - routeOffsets[batchNetIds[net]], nullptr);
             }
             time_cnt += clock() - t;
             //cudaDeviceSynchronize();

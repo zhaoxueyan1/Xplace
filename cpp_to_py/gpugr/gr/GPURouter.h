@@ -127,8 +127,13 @@ private:
     int *pinNum = nullptr, *pinNumOffset = nullptr, *pins = nullptr;
     int *routes = nullptr, *pinNumCPU = nullptr;
     int64_t *routesOffset = nullptr, *routesOffsetCPU = nullptr, *batchRouteOffsets = nullptr;
+    int64_t *routeLengths = nullptr;
+    int64_t *batchRouteCapacities = nullptr, *batchRouteLengths = nullptr;
+    int *batchRouteOverflows = nullptr;
+    int *batchNetIds = nullptr;
     int *allpins;
     int *points = nullptr, *gbpoints = nullptr;
+    size_t pointsCapacity = 0, gbpointsCapacity = 0;
     int *gbpinRoutes = nullptr, *gbpin2netId = nullptr, *plPinId2gbPinId = nullptr;
     float *capacity, *wireDist, *fixedLength, *fixed;
     int *wires, *vias, *prev;

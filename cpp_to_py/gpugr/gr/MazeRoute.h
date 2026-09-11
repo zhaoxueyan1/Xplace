@@ -30,7 +30,10 @@ public:
                     int SCALE,
                     int DIRECTION,
                     int routesOffset,
-                    int netId);
+                    int netId,
+                    int *batchNetIds,
+                    int64_t *routeLengths,
+                    const int64_t *routeOffsets);
 
     const static int MAX_TOT_PIN_NUM = 1000000, MAX_NUM_NET = 100;
 

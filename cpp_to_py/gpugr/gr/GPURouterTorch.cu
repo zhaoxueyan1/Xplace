@@ -97,14 +97,14 @@ __global__ void compGcellRouteForce(
     torch::PackedTensorAccessor32<float, 1, torch::RestrictPtrTraits> wirelength_weights,
     torch::PackedTensorAccessor32<float, 3, torch::RestrictPtrTraits> route_gradmat,
     float grad_weight, float unit_wire_cost, float unit_via_cost,
-    int *gbpinRoutes, int *gbpin2netId, int *routes, int64_t *routesOffset,
+    int *gbpinRoutes, int *gbpin2netId, int *routes, int64_t *routesOffset, int64_t *routeLengths,
     int numGbPin, int N, int LAYER, int xSize, int ySize, int DIRECTION
 ) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < numGbPin) {
         int netId = gbpin2netId[idx];
         routes += routesOffset[netId];
-        if (routes[0] == -1) {
+        if (routeLengths[netId] < 0) {
             // FIXME: failed PR, use floating cost instead of int cost
             return;
         }
@@ -462,7 +462,7 @@ torch::Tensor GPURouter::calcRouteGrad(torch::Tensor mask_map,
         wirelength_weights.packed_accessor32<float, 1, torch::RestrictPtrTraits>(),
         route_gradmat.packed_accessor32<float, 3, torch::RestrictPtrTraits>(),
         grad_weight, unit_wire_cost, unit_via_cost,
-        gbpinRoutes, gbpin2netId, routes, routesOffset,
+        gbpinRoutes, gbpin2netId, routes, routesOffset, routeLengths,
         numGbPin, N, LAYER, X, Y, DIRECTION
     );
 
