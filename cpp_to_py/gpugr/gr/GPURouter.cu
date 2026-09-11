@@ -935,7 +935,7 @@ void GPURouter::route(std::vector<GrNet> &nets, int iter) {
                     netsToRoute.emplace_back(s[i]), insert(s[i]), s[i] = -1, cnt = 0;
                 else
                     cnt++;
-                //if(cnt >= 100) break;
+                if(cnt >= 100) break;
                 if(iter && netsToRoute.size() - sz == MAX_BATCH_SIZE) break;
                 if(!iter && netsToRoute.size() - sz == std::min(250, MAX_BATCH_SIZE)) break;
             }
