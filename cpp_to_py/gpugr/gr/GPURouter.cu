@@ -937,7 +937,7 @@ void GPURouter::route(std::vector<GrNet> &nets, int iter) {
                     cnt++;
                 //if(cnt >= 100) break;
                 if(iter && netsToRoute.size() - sz == MAX_BATCH_SIZE) break;
-                if(!iter && netsToRoute.size() - sz == 250) break;
+                if(!iter && netsToRoute.size() - sz == std::min(250, MAX_BATCH_SIZE)) break;
             }
             while(lastUnroute < s.size() && s[lastUnroute] == -1) lastUnroute++;
             if (check_vis_correctness) checkVis();
@@ -951,6 +951,13 @@ void GPURouter::route(std::vector<GrNet> &nets, int iter) {
     reverse(batchSizes.begin(), batchSizes.end());
     reverse(netsToRoute.begin(), netsToRoute.end());
     logger.info("number of batches: %d;  number of nets: %d", batchSizes.size(), netsToRoute.size());
+    for (int batchSz : batchSizes) {
+        if (batchSz > MAX_BATCH_SIZE) {
+            throw std::runtime_error(
+                "GPU routing batch size " + std::to_string(batchSz) +
+                " exceeds MAX_BATCH_SIZE " + std::to_string(MAX_BATCH_SIZE));
+        }
+    }
     int startpos = 0; 
     int sumofpins = 0;
     // int lowestpins = 0;
@@ -1015,6 +1022,7 @@ void GPURouter::route(std::vector<GrNet> &nets, int iter) {
             //if(startpos == 11394)
                 //logger.info("net id %d", netsToRoute[startpos]);
             //netsToRoute[startpos] = 8026;
+            std::vector<int> batchPrepared(batchSize, 0);
             for(int i = 0; i < batchSize; i++) {
                 int netId = netsToRoute[startpos + i];
                 points[i] = offset;
@@ -1040,6 +1048,7 @@ void GPURouter::route(std::vector<GrNet> &nets, int iter) {
                     static_cast<size_t>(gbPinOffset) > gbpointsCapacity) {
                     throw std::runtime_error("GPU pattern-routing prepare exceeded batch buffer capacity");
                 }
+                batchPrepared[i] = prepared;
                 offset += prepared;
             }
             if (static_cast<size_t>(offset) > pointsCapacity ||
@@ -1072,17 +1081,34 @@ void GPURouter::route(std::vector<GrNet> &nets, int iter) {
                          DIRECTION,
                          routingLayerBegin,
                          routingLayerEnd);
-
             for (int i = 0; i < batchSize; ++i) {
                 routeLengths[netsToRoute[startpos + i]] = batchRouteLengths[i];
             }
             for (int i = 0; i < batchSize; ++i) {
                 if (batchRouteOverflows[i] != 0) {
                     const int netId = netsToRoute[startpos + i];
-                    throw std::runtime_error(
+                    std::string diag =
                         "GPU pattern-routing route buffer capacity exceeded for net " +
                         std::to_string(netId) + " (capacity " +
-                        std::to_string(batchRouteCapacities[i]) + ")");
+                        std::to_string(batchRouteCapacities[i]) + ", tree nodes " +
+                        std::to_string(batchPrepared[i] > 2 ? (batchPrepared[i] - 2) / 6 : 0) +
+                        ", pins " + std::to_string(pinNumCPU[netId]) +
+                        ", offsets " + std::to_string(routesOffsetCPU[netId]) + ".." +
+                        std::to_string(routesOffsetCPU[netId + 1]) +
+                        ", expected window " + std::to_string(static_cast<int64_t>(pinNumCPU[netId]) * 160) +
+                        ", batchSize " + std::to_string(batchSize) + ")";
+                    int mismatches = 0;
+                    for (int k = 0; k < NET_NUM && mismatches < 3; k++) {
+                        const int64_t window = routesOffsetCPU[k + 1] - routesOffsetCPU[k];
+                        if (window != static_cast<int64_t>(pinNumCPU[k]) * 160) {
+                            diag += " [net " + std::to_string(k) + " window " +
+                                    std::to_string(window) + " pins " +
+                                    std::to_string(pinNumCPU[k]) + "]";
+                            mismatches++;
+                        }
+                    }
+                    if (mismatches == 0) diag += " [offset/pin tables consistent]";
+                    throw std::runtime_error(diag);
                 }
             }
             

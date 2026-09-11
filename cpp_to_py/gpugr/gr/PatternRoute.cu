@@ -694,6 +694,7 @@ __global__ void cudaPatternRouteParallel(int64_t *map,
     routes += routeOffsets[blockIdx.x];
     int64_t* routeLength = routeLengths + blockIdx.x;
     const int64_t routeCapacity = routeCapacities[blockIdx.x];
+    int* routeOverflowFlag = routeOverflows != nullptr ? routeOverflows + blockIdx.x : nullptr;
     if (threadIdx.x == 0) {
         *routeLength = 1;
         if (routeOverflows != nullptr) routeOverflows[blockIdx.x] = 0;
@@ -996,8 +997,8 @@ __global__ void cudaPatternRouteParallel(int64_t *map,
                     maxlayer = prev[idx] / LAYER / LAYER / LAYER % LAYER;
                 for (int i = minlayer; i < maxlayer; i++) {
                     int id = i * N * N + (((i & 1) ^ DIRECTION) ? x * N + y : y * N + x);
-                    appendPatternRoute(routes, routeLength, routeCapacity, routeOverflows, id);
-                    appendPatternRoute(routes, routeLength, routeCapacity, routeOverflows, -1);
+                    appendPatternRoute(routes, routeLength, routeCapacity, routeOverflowFlag, id);
+                    appendPatternRoute(routes, routeLength, routeCapacity, routeOverflowFlag, -1);
                     vias[id]++;
                 }
                 // Assign #vias to gbpinRoutes
@@ -1035,11 +1036,11 @@ __global__ void cudaPatternRouteParallel(int64_t *map,
                             last_routeId = encodeId;
 
                             appendPatternRoute(
-                                routes, routeLength, routeCapacity, routeOverflows, min(entry, p1));
+                                routes, routeLength, routeCapacity, routeOverflowFlag, min(entry, p1));
                             appendPatternRoute(routes,
                                                routeLength,
                                                routeCapacity,
-                                               routeOverflows,
+                                               routeOverflowFlag,
                                                max(entry, p1) - min(entry, p1));
                             for (int i = min(entry, p1); i < max(entry, p1); i++) wires[i]++;
                             // atomicAdd(wires + i, 1);
@@ -1047,8 +1048,8 @@ __global__ void cudaPatternRouteParallel(int64_t *map,
                         if (p1 != mid) {
                             for (int i = min(entrylayer, midlayer); i < max(entrylayer, midlayer); i++) {
                                 int id = i * N * N + (((i & 1) ^ DIRECTION) ? midx * N + midy : midy * N + midx);
-                                appendPatternRoute(routes, routeLength, routeCapacity, routeOverflows, id);
-                                appendPatternRoute(routes, routeLength, routeCapacity, routeOverflows, -1);
+                                appendPatternRoute(routes, routeLength, routeCapacity, routeOverflowFlag, id);
+                                appendPatternRoute(routes, routeLength, routeCapacity, routeOverflowFlag, -1);
                                 vias[id]++;
                                 // atomicAdd(vias + id, 1);
                             }
@@ -1059,11 +1060,11 @@ __global__ void cudaPatternRouteParallel(int64_t *map,
                             last_routeId = encodeId;
 
                             appendPatternRoute(
-                                routes, routeLength, routeCapacity, routeOverflows, min(mid, p3));
+                                routes, routeLength, routeCapacity, routeOverflowFlag, min(mid, p3));
                             appendPatternRoute(routes,
                                                routeLength,
                                                routeCapacity,
-                                               routeOverflows,
+                                               routeOverflowFlag,
                                                max(mid, p3) - min(mid, p3));
 
                             for (int i = min(mid, p3); i < max(mid, p3); i++) wires[i]++;
@@ -1074,8 +1075,8 @@ __global__ void cudaPatternRouteParallel(int64_t *map,
                             if (!(p3 / N / N & 1) ^ DIRECTION) cudaSwap(tempx, tempy);
                             for (int i = min(midlayer, lastlayer); i < max(midlayer, lastlayer); i++) {
                                 int id = i * N * N + (((i & 1) ^ DIRECTION) ? tempx * N + tempy : tempy * N + tempx);
-                                appendPatternRoute(routes, routeLength, routeCapacity, routeOverflows, id);
-                                appendPatternRoute(routes, routeLength, routeCapacity, routeOverflows, -1);
+                                appendPatternRoute(routes, routeLength, routeCapacity, routeOverflowFlag, id);
+                                appendPatternRoute(routes, routeLength, routeCapacity, routeOverflowFlag, -1);
                                 vias[id]++;
                                 // atomicAdd(vias + id, 1);
                             }
@@ -1086,11 +1087,11 @@ __global__ void cudaPatternRouteParallel(int64_t *map,
                             last_routeId = encodeId;
 
                             appendPatternRoute(
-                                routes, routeLength, routeCapacity, routeOverflows, min(p4, last));
+                                routes, routeLength, routeCapacity, routeOverflowFlag, min(p4, last));
                             appendPatternRoute(routes,
                                                routeLength,
                                                routeCapacity,
-                                               routeOverflows,
+                                               routeOverflowFlag,
                                                max(p4, last) - min(p4, last));
                             for (int i = min(p4, last); i < max(p4, last); i++) wires[i]++;
                             // atomicAdd(wires + i, 1);
@@ -1102,11 +1103,11 @@ __global__ void cudaPatternRouteParallel(int64_t *map,
                         last_routeId = encodeId;
 
                         appendPatternRoute(
-                            routes, routeLength, routeCapacity, routeOverflows, min(last, entry));
+                            routes, routeLength, routeCapacity, routeOverflowFlag, min(last, entry));
                         appendPatternRoute(routes,
                                            routeLength,
                                            routeCapacity,
-                                           routeOverflows,
+                                           routeOverflowFlag,
                                            max(last, entry) - min(last, entry));
                         for (int i = min(last, entry); i < max(last, entry); i++) wires[i]++;
                         // atomicAdd(wires + i, 1);
