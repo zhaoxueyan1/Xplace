@@ -6,8 +6,10 @@
 
 namespace gr {
 
-// Keep headroom for long final-routing paths; this directly scales route-buffer GPU memory.
-constexpr int MAX_ROUTE_LEN_PER_PIN = 160;
+// Route records observed in the full-chip XSTop runs stay well below this
+// bound.  Keeping the per-pin reserve bounded is important because the
+// aggregate buffer is allocated for every net before routing starts.
+constexpr int MAX_ROUTE_LEN_PER_PIN = 128;
 
 constexpr int INF = 10000000;
 constexpr int MAX_COST = 10000000;
@@ -56,7 +58,6 @@ void GPURouter::initialize(int device_id,
                            int csrn_scale,
                            int routing_layer_begin,
                            int routing_layer_end) {
-    gpuMR.startGPU(device_id, layer, cgxsize_, cgysize_, routing_layer_begin, routing_layer_end);
     DEVICE_ID = device_id;
     DIRECTION = direction;
     COARSENING_SCALE = csrn_scale;
@@ -99,7 +100,7 @@ void GPURouter::initialize(int device_id,
 }
 
 GPURouter::~GPURouter() {
-    gpuMR.endGPU();
+    if (mazeInitialized) gpuMR.endGPU();
     cudaFree(dist);
     cudaFree(prev);
     cudaFree(capacity);
@@ -702,6 +703,10 @@ __global__ void generateBatch(int n, int *minx, int *maxx, int *miny, int *maxy,
 }
 
 void GPURouter::route(std::vector<GrNet> &nets, int iter) {
+    if (iter > 0 && !mazeInitialized) {
+        gpuMR.startGPU(DEVICE_ID, LAYER, cgxsize, cgysize, routingLayerBegin, routingLayerEnd);
+        mazeInitialized = true;
+    }
     logger.info("GPU Routing start... DIRECTION: %d", DIRECTION);
 
     if (iter > 0 && routesOffsetCPU[NET_NUM] > std::numeric_limits<int>::max()) {
@@ -1095,12 +1100,12 @@ void GPURouter::route(std::vector<GrNet> &nets, int iter) {
                         ", pins " + std::to_string(pinNumCPU[netId]) +
                         ", offsets " + std::to_string(routesOffsetCPU[netId]) + ".." +
                         std::to_string(routesOffsetCPU[netId + 1]) +
-                        ", expected window " + std::to_string(static_cast<int64_t>(pinNumCPU[netId]) * 160) +
+                        ", expected window " + std::to_string(static_cast<int64_t>(pinNumCPU[netId]) * MAX_ROUTE_LEN_PER_PIN) +
                         ", batchSize " + std::to_string(batchSize) + ")";
                     int mismatches = 0;
                     for (int k = 0; k < NET_NUM && mismatches < 3; k++) {
                         const int64_t window = routesOffsetCPU[k + 1] - routesOffsetCPU[k];
-                        if (window != static_cast<int64_t>(pinNumCPU[k]) * 160) {
+                        if (window != static_cast<int64_t>(pinNumCPU[k]) * MAX_ROUTE_LEN_PER_PIN) {
                             diag += " [net " + std::to_string(k) + " window " +
                                     std::to_string(window) + " pins " +
                                     std::to_string(pinNumCPU[k]) + "]";

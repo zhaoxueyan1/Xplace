@@ -123,6 +123,7 @@ private:
     int routingLayerBegin = 0, routingLayerEnd = -1;
     int COARSENING_SCALE;
     int cgxsize, cgysize;
+    bool mazeInitialized = false;
 
     int *pinNum = nullptr, *pinNumOffset = nullptr, *pins = nullptr;
     int *routes = nullptr, *pinNumCPU = nullptr;

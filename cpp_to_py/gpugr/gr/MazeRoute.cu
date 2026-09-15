@@ -3,6 +3,17 @@
 
 #include "MazeRoute.h"
 
+#include <stdexcept>
+#include <string>
+
+namespace {
+void checkCudaAlloc(cudaError_t error, const char* name) {
+    if (error != cudaSuccess) {
+        throw std::runtime_error(std::string("failed to allocate maze-routing ") + name + ": " + cudaGetErrorString(error));
+    }
+}
+}
+
 namespace gr {
 
 #define tracing 0
@@ -977,7 +988,14 @@ void GPUMazeRouter::getResults(double &time_cnt,
     // FIXME: use taskflow for MazeRoute would be faster while it would cause unknown bug 
     //        during terminating the Python program
     constexpr bool use_tf = false;
+    int maxPinsPerNet = 1;
+    for (int net = 0; net < batchSize; ++net) {
+        maxPinsPerNet = std::max(maxPinsPerNet, pins[net * MAX_PIN_SIZE_PER_NET + 1]);
+    }
+    ensureBatchStorage(batchSize, maxPinsPerNet);
     int *map = cudaMap, *prev = cudaPrev, *mark = markMap, *routedPin = cudaRoutedPin;
+    const int markStride = pinCapacity * 10;
+    const int routedPinStride = pinCapacity;
     dim3 blockLR(X, LAYER / 2), blockUD(Y, LAYER / 2);
     if (use_tf) {
         std::vector<tf::cudaScopedPerThreadStream> streams(batchSize);
@@ -1005,8 +1023,8 @@ void GPUMazeRouter::getResults(double &time_cnt,
                             sweeplr[iter * MAX_TURN_NUM + turn] = flow[i * LOG + d].kernel(blockLR, (Y + 1) / 2, 4 * Y * sizeof(int), sweepLR, costL, costR, map + i * LAYER * X * Y, prev + i * LAYER * X * Y, 1 + (DIRECTION == 1), X, Y).succeed(minall[iter * MAX_TURN_NUM + turn]);
                             sweepud[iter * MAX_TURN_NUM + turn] = flow[i * LOG + d].kernel(blockUD, (X + 1) / 2, 4 * X * sizeof(int), sweepUD, costL, costR, map + i * LAYER * X * Y, prev + i * LAYER * X * Y, 1 + (DIRECTION == 0), X, Y).succeed(minall[iter * MAX_TURN_NUM + turn]);
                         }        
-                        path[iter] = flow[i * LOG + d].kernel(1, 1, 0, Path, map + i * LAYER * X * Y, pins + i * MAX_PIN_SIZE_PER_NET + 1, routedPin + i * MAX_PIN_NUM, prev + i * LAYER * X * Y, mark + i * MAX_PIN_NUM * 10, LAYER, X, Y, N, DIRECTION, SCALE).name("path" + std::to_string(d)).succeed(sweeplr[(iter + 1) * MAX_TURN_NUM - 1]).succeed(sweepud[(iter + 1) * MAX_TURN_NUM - 1]);
-                        fgroute[iter] = flow[i * LOG + d].kernel(1, SCALE * SCALE, 4 * LAYER * SCALE * SCALE * sizeof(int), routeFG, costSum, pins + i * MAX_PIN_SIZE_PER_NET + 1, mark + i * MAX_PIN_NUM * 10, dist + i * LAYER * N * N, fgprev + i * LAYER * N * N, wireCost, viaCost, wires, vias, routes, LAYER, SCALE, X, Y, N, DIRECTION, routingLayerBegin, routingLayerEnd, routeLengths + batchNetIds[i], routeOffsets[batchNetIds[i] + 1] - routeOffsets[batchNetIds[i]], nullptr).name("fgroute" + std::to_string(d)).succeed(path[iter]);
+                        path[iter] = flow[i * LOG + d].kernel(1, 1, 0, Path, map + i * LAYER * X * Y, pins + i * MAX_PIN_SIZE_PER_NET + 1, routedPin + i * routedPinStride, prev + i * LAYER * X * Y, mark + i * markStride, LAYER, X, Y, N, DIRECTION, SCALE).name("path" + std::to_string(d)).succeed(sweeplr[(iter + 1) * MAX_TURN_NUM - 1]).succeed(sweepud[(iter + 1) * MAX_TURN_NUM - 1]);
+                        fgroute[iter] = flow[i * LOG + d].kernel(1, SCALE * SCALE, 4 * LAYER * SCALE * SCALE * sizeof(int), routeFG, costSum, pins + i * MAX_PIN_SIZE_PER_NET + 1, mark + i * markStride, dist + i * LAYER * N * N, fgprev + i * LAYER * N * N, wireCost, viaCost, wires, vias, routes, LAYER, SCALE, X, Y, N, DIRECTION, routingLayerBegin, routingLayerEnd, routeLengths + batchNetIds[i], routeOffsets[batchNetIds[i] + 1] - routeOffsets[batchNetIds[i]], nullptr).name("fgroute" + std::to_string(d)).succeed(path[iter]);
                     }
                     flow[i * LOG + d].instantiate();
                 }
@@ -1036,8 +1054,8 @@ void GPUMazeRouter::getResults(double &time_cnt,
             //exit(0);
             map += LAYER * X * Y;
             prev += LAYER * X * Y;
-            mark += MAX_PIN_NUM * 10;
-            routedPin += MAX_PIN_NUM;
+            mark += markStride;
+            routedPin += routedPinStride;
             pins += MAX_PIN_SIZE_PER_NET;
             dist += LAYER * N * N;
             fgprev += LAYER * N * N;
@@ -1073,8 +1091,8 @@ void GPUMazeRouter::getResults(double &time_cnt,
             //exit(0);
             map += LAYER * X * Y;
             prev += LAYER * X * Y;
-            mark += MAX_PIN_NUM * 10;
-            routedPin += MAX_PIN_NUM;
+            mark += markStride;
+            routedPin += routedPinStride;
             pins += MAX_PIN_SIZE_PER_NET;
             dist += LAYER * N * N;
             fgprev += LAYER * N * N;
@@ -1095,28 +1113,72 @@ void GPUMazeRouter::startGPU(int device_id, int layer, int x, int y, int routing
     NX = NY = 1;
     while (NX <= X) NX <<= 1;
     while (NY <= Y) NY <<= 1;
-    cudaMalloc(&markMap, MAX_PIN_NUM * MAX_NUM_NET * 10 * sizeof(int));
-    cudaMalloc(&cost, LAYER * X * Y * sizeof(int));
-    cudaMalloc(&via, LAYER * X * Y * sizeof(int));
-    cudaMalloc(&costL, LAYER * X * Y * sizeof(int));
-    cudaMalloc(&costR, LAYER * X * Y * sizeof(int));
-    cudaMalloc(&reset, MAX_NUM_NET * LAYER * X * Y * sizeof(int));
-    cudaMemset(reset, 0, MAX_NUM_NET * LAYER * X * Y * sizeof(int));
-    cudaMalloc(&cudaMap, MAX_NUM_NET * LAYER * X * Y * sizeof(int));
-    cudaMalloc(&cudaRoutedPin, MAX_PIN_NUM * MAX_NUM_NET * sizeof(int));
-    cudaMalloc(&cudaPrev, MAX_NUM_NET * LAYER * X * Y * sizeof(int));
+    checkCudaAlloc(cudaMalloc(&cost, LAYER * X * Y * sizeof(int)), "cost map");
+    checkCudaAlloc(cudaMalloc(&via, LAYER * X * Y * sizeof(int)), "via map");
+    checkCudaAlloc(cudaMalloc(&costL, LAYER * X * Y * sizeof(int)), "horizontal cost map");
+    checkCudaAlloc(cudaMalloc(&costR, LAYER * X * Y * sizeof(int)), "vertical cost map");
+}
+
+void GPUMazeRouter::ensureBatchStorage(int batchSize, int maxPinsPerNet) {
+    if (batchSize <= 0 || batchSize > MAX_NUM_NET) {
+        throw std::runtime_error("invalid maze-routing batch size " + std::to_string(batchSize));
+    }
+    maxPinsPerNet = std::max(1, std::min(maxPinsPerNet, MAX_PIN_NUM));
+    const size_t gridCells = static_cast<size_t>(LAYER) * X * Y;
+    if (batchSize > batchCapacity) {
+        const size_t batchGridInts = static_cast<size_t>(batchSize) * gridCells;
+        int* newReset = nullptr;
+        int* newMap = nullptr;
+        int* newPrev = nullptr;
+        checkCudaAlloc(cudaMalloc(&newReset, batchGridInts * sizeof(int)), "reset map");
+        checkCudaAlloc(cudaMalloc(&newMap, batchGridInts * sizeof(int)), "maze map");
+        checkCudaAlloc(cudaMalloc(&newPrev, batchGridInts * sizeof(int)), "maze predecessor map");
+        if (reset) cudaFree(reset);
+        if (cudaMap) cudaFree(cudaMap);
+        if (cudaPrev) cudaFree(cudaPrev);
+        reset = newReset;
+        cudaMap = newMap;
+        cudaPrev = newPrev;
+        batchCapacity = batchSize;
+    }
+    if (batchSize > pinBatchCapacity || maxPinsPerNet > pinCapacity) {
+        const size_t pinInts = static_cast<size_t>(maxPinsPerNet) * batchSize;
+        int* newMark = nullptr;
+        int* newRoutedPin = nullptr;
+        checkCudaAlloc(cudaMalloc(&newMark, pinInts * 10 * sizeof(int)), "mark map");
+        checkCudaAlloc(cudaMalloc(&newRoutedPin, pinInts * sizeof(int)), "routed-pin map");
+        if (markMap) cudaFree(markMap);
+        if (cudaRoutedPin) cudaFree(cudaRoutedPin);
+        markMap = newMark;
+        cudaRoutedPin = newRoutedPin;
+        pinCapacity = maxPinsPerNet;
+        pinBatchCapacity = batchSize;
+    }
+    checkCudaAlloc(cudaMemset(reset, 0, static_cast<size_t>(batchSize) * gridCells * sizeof(int)), "reset map initialization");
 }
 
 void GPUMazeRouter::endGPU() {
-    cudaFree(markMap);
-    cudaFree(cost);
-    cudaFree(via);
-    cudaFree(costL);
-    cudaFree(costR);
-    cudaFree(reset);
-    cudaFree(cudaMap);
-    cudaFree(cudaRoutedPin);
-    cudaFree(cudaPrev);
+    if (markMap) cudaFree(markMap);
+    if (cost) cudaFree(cost);
+    if (via) cudaFree(via);
+    if (costL) cudaFree(costL);
+    if (costR) cudaFree(costR);
+    if (reset) cudaFree(reset);
+    if (cudaMap) cudaFree(cudaMap);
+    if (cudaRoutedPin) cudaFree(cudaRoutedPin);
+    if (cudaPrev) cudaFree(cudaPrev);
+    markMap = nullptr;
+    cost = nullptr;
+    via = nullptr;
+    costL = nullptr;
+    costR = nullptr;
+    reset = nullptr;
+    cudaMap = nullptr;
+    cudaRoutedPin = nullptr;
+    cudaPrev = nullptr;
+    batchCapacity = 0;
+    pinCapacity = 0;
+    pinBatchCapacity = 0;
 }
 
 }  // namespace gr
