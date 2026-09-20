@@ -20,9 +20,9 @@ public:
     void setNoRoute() { noroute = 1; }
     int area() { return (upperx - lowerx + 1) * (uppery - lowery + 1); }
     int hpwl() { return upperx + uppery - lowerx - lowery; }
-    const std::vector<int>& getWires() { return wires; }
-    const std::vector<int>& getVias() { return vias; }
-    const std::vector<std::vector<int>>& getPins() { return pins; }
+    const std::vector<int>& getWires() const { return wires; }
+    const std::vector<int>& getVias() const { return vias; }
+    const std::vector<std::vector<int>>& getPins() const { return pins; }
     int lowerx, lowery, upperx, uppery, noroute = 0;
     std::vector<int> points;
     std::vector<int> pin2gbpinId;

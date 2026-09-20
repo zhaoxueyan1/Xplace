@@ -15,23 +15,62 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 message(STATUS PROJECT_SOURCE_DIR=${PROJECT_SOURCE_DIR})
 set(PATH_THIRDPARTY_ROOT ${PROJECT_SOURCE_DIR}/thirdparty)
-set(XPLACE_LIB_DIR ${PROJECT_SOURCE_DIR}/cpp_to_py/cpybin)
+set(
+  XPLACE_LIB_DIR
+  "${PROJECT_SOURCE_DIR}/cpp_to_py/cpybin"
+  CACHE PATH "Directory where Xplace Python extensions are installed"
+)
+set(
+  XPLACE_LICENSE_DIR
+  "${PROJECT_SOURCE_DIR}/licenses/cugr"
+  CACHE PATH "Directory where third-party license files are installed"
+)
 
 set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
-set(CMAKE_INSTALL_RPATH ${XPLACE_LIB_DIR})
-
-# set _GLIBCXX_USE_CXX11_ABI for torch
-if(NOT CMAKE_CXX_ABI)
-    set(CMAKE_CXX_ABI 0 CACHE STRING
-        "Choose the value for _GLIBCXX_USE_CXX11_ABI, options are: 0|1."
-        FORCE)
-endif(NOT CMAKE_CXX_ABI)
-message(STATUS "CMAKE_CXX_ABI: _GLIBCXX_USE_CXX11_ABI=${CMAKE_CXX_ABI}")
-add_definitions(-D_GLIBCXX_USE_CXX11_ABI=${CMAKE_CXX_ABI})
+set(CMAKE_INSTALL_RPATH "$ORIGIN")
 
 # PyBind11
 add_subdirectory(${PATH_THIRDPARTY_ROOT}/pybind11)
+# pybind11's Python discovery uses the modern ``Python_*`` variables while
+# the legacy Xplace targets consume ``PYTHON_INCLUDE_DIRS``. Bridge both so
+# every Torch/pybind target, including the CPU-only CUGR target, sees Python.h
+# in a clean build.
+if(NOT PYTHON_INCLUDE_DIRS)
+  if(Python_INCLUDE_DIRS)
+    set(PYTHON_INCLUDE_DIRS ${Python_INCLUDE_DIRS})
+  elseif(Python_INCLUDE_DIR)
+    set(PYTHON_INCLUDE_DIRS ${Python_INCLUDE_DIR})
+  endif()
+endif()
 message(STATUS "PYTHON_INCLUDE_DIRS: ${PYTHON_INCLUDE_DIRS}")
+
+# Match Torch's C++ standard-library ABI in a clean build. Keep an explicit
+# CMAKE_CXX_ABI override for toolchains that intentionally use a different
+# libtorch build.
+if(NOT DEFINED CMAKE_CXX_ABI OR "${CMAKE_CXX_ABI}" STREQUAL "")
+  set(_XPLACE_PYTHON_EXECUTABLE "${Python_EXECUTABLE}")
+  if(NOT _XPLACE_PYTHON_EXECUTABLE)
+    set(_XPLACE_PYTHON_EXECUTABLE "${PYTHON_EXECUTABLE}")
+  endif()
+  execute_process(
+    COMMAND "${_XPLACE_PYTHON_EXECUTABLE}" -c "import torch; print(int(torch.compiled_with_cxx11_abi()))"
+    RESULT_VARIABLE _XPLACE_TORCH_ABI_RESULT
+    OUTPUT_VARIABLE _XPLACE_TORCH_ABI
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET
+  )
+  if(_XPLACE_TORCH_ABI_RESULT EQUAL 0 AND _XPLACE_TORCH_ABI MATCHES "^[01]$")
+    set(CMAKE_CXX_ABI "${_XPLACE_TORCH_ABI}" CACHE STRING
+        "Choose the value for _GLIBCXX_USE_CXX11_ABI, options are: 0|1."
+        FORCE)
+  else()
+    set(CMAKE_CXX_ABI 0 CACHE STRING
+        "Choose the value for _GLIBCXX_USE_CXX11_ABI, options are: 0|1."
+        FORCE)
+  endif()
+endif()
+message(STATUS "CMAKE_CXX_ABI: _GLIBCXX_USE_CXX11_ABI=${CMAKE_CXX_ABI}")
+add_definitions(-D_GLIBCXX_USE_CXX11_ABI=${CMAKE_CXX_ABI})
 
 # Flute
 add_subdirectory(${PATH_THIRDPARTY_ROOT}/flute)

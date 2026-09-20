@@ -21,6 +21,8 @@ Please refer to `cpp_to_py/gpugr/PyBindCppMain.cpp`.
 - `device_id`: GPU id.
 - `route_xSize` / `route_ySize`: Given GR GridGraph size. If the given size is `0`, use the `GRIDGRAPH` definition in DEF file. If the given size is `0` and there is no definition in DEF, we set it as `512`.
 - `rrrIters`: The number of rip-up and re-route iterations (maze route). If `rrrIters = 0`, perform the pattern route only.
+- `backend`: `cuda` selects the CUDA router, `cpu_pr` selects the diagnostic CPU pattern router, and `cugr2` selects the explicit CPU CUGR2 route core. `cpu_pr` and `cugr2` require `rrrIters = 0`; they reject positive RRR values instead of silently changing the requested effort.
+- The legacy Rsyn-backed `cugr` extension is disabled in the default Xplace CPU build; enable it explicitly with `-DXPLACE_BUILD_LEGACY_CUGR=ON` when its separate integration source is available.
 - `csrn_scale`: The size of coarsen grid in maze routing.
 - `route_guide`: The file name of output route guide.
 - `bottom_routing_layer` / `top_routing_layer`: Optional inclusive routing-layer

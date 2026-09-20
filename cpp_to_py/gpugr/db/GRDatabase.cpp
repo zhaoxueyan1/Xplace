@@ -535,7 +535,7 @@ std::tuple<int, int, int, int> GRDatabase::getOrientOffset(int orient, int lx, i
     return offset;
 }
 
-int GRDatabase::encodeId(int l, int x, int y) {
+int GRDatabase::encodeId(int l, int x, int y) const {
     if (!(l & 1) ^ m1direction) std::swap(x, y);
     return l * nMaxGrid * nMaxGrid + x * nMaxGrid + y;
 }

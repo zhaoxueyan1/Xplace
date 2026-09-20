@@ -60,6 +60,10 @@ GGRBackend RouteForce::resolveBackend() {
         throw std::runtime_error(
             "backend=cpu_pr operation=run_ggr only supports rrr_iters=0; CPU RRR is unsupported");
     }
+    if (backend == GGRBackend::CUGR2 && grSetting.rrrIters > 0) {
+        throw std::runtime_error(
+            "backend=cugr2 operation=run_ggr only supports rrr_iters=0; CUGR2 RRR is unsupported");
+    }
     grSetting.resolvedBackend = backend;
     return backend;
 }
@@ -88,6 +92,20 @@ void RouteForce::run_ggr() {
         }
 
         logger.info("Total CPU PR GR Time: %.4f", T_total.elapsed());
+        logger.reset_logger();
+        return;
+    }
+
+    if (backend == GGRBackend::CUGR2) {
+        cugr2Router.initialize(grdb);
+        utils::timer T;
+        T.start();
+        cugr2Router.route(grdb);
+        logger.info("##### CUGR2 CPU Routing Time: %.4f #####", T.elapsed());
+        if (grSetting.routeGuideFile != "") {
+            grdb.writeGuides(grSetting.routeGuideFile);
+        }
+        logger.info("Total CUGR2 GR Time: %.4f", T_total.elapsed());
         logger.reset_logger();
         return;
     }
@@ -158,6 +176,7 @@ void RouteForce::run_ggr() {
 
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> RouteForce::getDemandMap() {
     if (backend == GGRBackend::CPU_PR) return cpuRouter.getDemandMap();
+    if (backend == GGRBackend::CUGR2) return cugr2Router.getDemandMap();
 #if ENABLE_CUDA
     return router.getDemandMap();
 #else
@@ -167,6 +186,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> RouteForce::getDemandMap
 
 torch::Tensor RouteForce::getCapacityMap() {
     if (backend == GGRBackend::CPU_PR) return cpuRouter.getCapacityMap();
+    if (backend == GGRBackend::CUGR2) return cugr2Router.getCapacityMap();
 #if ENABLE_CUDA
     return router.getCapacityMap();
 #else
@@ -176,6 +196,7 @@ torch::Tensor RouteForce::getCapacityMap() {
 
 torch::Tensor RouteForce::getRawWireDemandMap() {
     if (backend == GGRBackend::CPU_PR) return cpuRouter.getRawWireDemandMap();
+    if (backend == GGRBackend::CUGR2) return cugr2Router.getRawWireDemandMap();
 #if ENABLE_CUDA
     return router.getRawWireDemandMap();
 #else
@@ -185,6 +206,7 @@ torch::Tensor RouteForce::getRawWireDemandMap() {
 
 torch::Tensor RouteForce::getFixUsageMap() {
     if (backend == GGRBackend::CPU_PR) return cpuRouter.getFixUsageMap();
+    if (backend == GGRBackend::CUGR2) return cugr2Router.getFixUsageMap();
     return buildGridGraphMapTensor(
         grdb.fixTmpUsage,
         grdb.nLayers,
@@ -196,6 +218,7 @@ torch::Tensor RouteForce::getFixUsageMap() {
 
 torch::Tensor RouteForce::getMovUsageMap() {
     if (backend == GGRBackend::CPU_PR) return cpuRouter.getMovUsageMap();
+    if (backend == GGRBackend::CUGR2) return cugr2Router.getMovUsageMap();
     return buildGridGraphMapTensor(
         grdb.movTmpUsage,
         grdb.nLayers,
@@ -319,6 +342,7 @@ torch::Tensor RouteForce::calcInflatedPinRelCpos(torch::Tensor node_inflate_rati
 
 int RouteForce::getNumOvflNets() {
     if (backend == GGRBackend::CPU_PR) return cpuRouter.getNumOvflNets();
+    if (backend == GGRBackend::CUGR2) return cugr2Router.getNumOvflNets();
 #if ENABLE_CUDA
     return router.getNumOvflNets();
 #else
@@ -344,6 +368,7 @@ std::vector<std::string> RouteForce::getRoutingLayerNames() const {
 
 std::vector<std::vector<int>> RouteForce::getRawRoutes() {
     if (backend == GGRBackend::CPU_PR) return cpuRouter.getRawRoutes();
+    if (backend == GGRBackend::CUGR2) return cugr2Router.getRawRoutes();
 #if ENABLE_CUDA
     return router.getRawRoutes();
 #else

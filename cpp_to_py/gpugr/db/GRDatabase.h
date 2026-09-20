@@ -120,7 +120,7 @@ public:
     std::pair<int, int> reportGRStat();
     void writeGuides(std::string outputFile);
 
-    int encodeId(int l, int x, int y);
+    int encodeId(int l, int x, int y) const;
     std::tuple<int, int, int, int> getOrientOffset(int orient, int lx, int ly, int hx, int hy);
     int getEOLSpace(int width, int l);
     int getParallelRunSpace(int l, int width, int length);

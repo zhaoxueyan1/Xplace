@@ -1,3 +1,10 @@
 [submodule "thirdparty/pybind11"]
 	path = thirdparty/pybind11
 	url = https://github.com/pybind/pybind11.git
+[submodule "thirdparty/cu-gr"]
+	path = thirdparty/cu-gr
+	url = https://github.com/cuhk-eda/cu-gr.git
+[submodule "thirdparty/cu-gr-2"]
+	path = thirdparty/cu-gr-2
+	url = git@gitee.com:ieda-ipd/cu-gr-2.git
+	branch = ecc-integration

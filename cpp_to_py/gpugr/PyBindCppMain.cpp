@@ -966,6 +966,10 @@ bool loadGRParams(const pybind11::dict& kwargs) {
         throw std::runtime_error(
             "backend=cpu_pr operation=load_gr_params only supports rrr_iters=0; CPU RRR is unsupported");
     }
+    if (gr::grSetting.backend == gr::GGRBackend::CUGR2 && gr::grSetting.rrrIters > 0) {
+        throw std::runtime_error(
+            "backend=cugr2 operation=load_gr_params only supports rrr_iters=0; CUGR2 RRR is unsupported");
+    }
 #if !ENABLE_CUDA
     if (gr::grSetting.backend == gr::GGRBackend::CUDA) {
         throw std::runtime_error(

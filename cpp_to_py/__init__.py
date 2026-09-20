@@ -10,6 +10,7 @@ _EXTENSION_NAMES = [
     "draw_placement",
     "wa_wirelength_hpwl_cuda",
     "gpugr",
+    "cugr",
     "gpudp",
     "routedp",
     "gputimer",

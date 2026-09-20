@@ -796,6 +796,39 @@ void CPURouter::route(std::vector<GrNet>& nets) {
     markOverflowNets(nets);
 }
 
+void CPURouter::loadCanonicalRoutes(const std::vector<GrNet>& nets,
+                                    const std::vector<std::vector<int>>& canonicalRawRoutes) {
+    if (canonicalRawRoutes.size() != nets.size()) {
+        throw std::runtime_error("backend=cugr2 operation=load_routes net/raw-route size mismatch");
+    }
+    const int gridGraphSize = LAYER * N * N;
+    std::fill(wires.begin(), wires.end(), 0);
+    std::fill(vias.begin(), vias.end(), 0);
+    rawRoutes = canonicalRawRoutes;
+    for (const auto& rawRoute : rawRoutes) {
+        if (rawRoute.empty() || rawRoute[0] < 0) continue;
+        const int end = std::min(static_cast<int>(rawRoute.size()), rawRoute[0]);
+        for (int i = 1; i + 1 < end; i += 2) {
+            const int start = rawRoute[i];
+            const int span = rawRoute[i + 1];
+            if (span > 0) {
+                if (start < 0 || start + span >= gridGraphSize) {
+                    throw std::runtime_error("backend=cugr2 operation=load_routes wire outside grid");
+                }
+                for (int offset = 0; offset < span; ++offset) wires[start + offset] += 1;
+            } else if (span == -1) {
+                if (start < 0 || start >= gridGraphSize) {
+                    throw std::runtime_error("backend=cugr2 operation=load_routes via outside grid");
+                }
+                vias[start] += 1;
+            } else {
+                throw std::runtime_error("backend=cugr2 operation=load_routes invalid route entry");
+            }
+        }
+    }
+    markOverflowNets(nets);
+}
+
 torch::Tensor CPURouter::buildGridTensor(const std::vector<float>& values) const {
     auto map = torch::zeros({LAYER, X, Y}, torch::dtype(torch::kFloat32));
     auto accessor = map.accessor<float, 3>();
