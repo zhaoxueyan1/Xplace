@@ -8,6 +8,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from cpu_route_toy_fixture import TOY_DEF, TOY_LEF
+
 XPLACE_ROOT = Path(__file__).resolve().parents[2]
 BUILD_ROOT = XPLACE_ROOT / "build_cpu_pr"
 RUNTIME_ROOT = os.environ.get("XPLACE_CPU_RUNTIME_ROOT")
@@ -34,7 +36,7 @@ else:
 
 
 class TestCPUPatternRoute(unittest.TestCase):
-    def _run_routeable_net(self, backend):
+    def _run_routeable_net(self, backend, threads=1, expected_workers=1):
         gpugr_candidates = sorted(GPUGR_ROOT.glob("gpugr*.so"))
         io_parser_candidates = sorted(IO_PARSER_ROOT.glob("io_parser*.so"))
         if (
@@ -51,93 +53,8 @@ class TestCPUPatternRoute(unittest.TestCase):
             tmp_path = Path(tmp)
             lef_path = tmp_path / "cpu_pr.lef"
             def_path = tmp_path / "cpu_pr.def"
-            lef_path.write_text(
-                """VERSION 5.8 ;
-BUSBITCHARS "[]" ;
-DIVIDERCHAR "/" ;
-UNITS
-  DATABASE MICRONS 1000 ;
-END UNITS
-LAYER M1
-  TYPE ROUTING ;
-  DIRECTION HORIZONTAL ;
-  PITCH 1 ;
-  WIDTH 0.2 ;
-  SPACING 0.2 ;
-END M1
-LAYER VIA1
-  TYPE CUT ;
-  SPACING 0.2 ;
-END VIA1
-LAYER M2
-  TYPE ROUTING ;
-  DIRECTION VERTICAL ;
-  PITCH 1 ;
-  WIDTH 0.2 ;
-  SPACING 0.2 ;
-END M2
-VIA VIA12 DEFAULT
-  LAYER M1 ;
-    RECT -0.1 -0.1 0.1 0.1 ;
-  LAYER VIA1 ;
-    RECT -0.1 -0.1 0.1 0.1 ;
-  LAYER M2 ;
-    RECT -0.1 -0.1 0.1 0.1 ;
-END VIA12
-SITE core
-  CLASS CORE ;
-  SIZE 1 BY 1 ;
-END core
-MACRO BUF
-  CLASS CORE ;
-  ORIGIN 0 0 ;
-  SIZE 1 BY 1 ;
-  SYMMETRY X Y ;
-  SITE core ;
-  PIN A
-    DIRECTION INPUT ;
-    USE SIGNAL ;
-    PORT
-      LAYER M1 ;
-      RECT 0.1 0.4 0.3 0.6 ;
-    END
-  END A
-  PIN Y
-    DIRECTION OUTPUT ;
-    USE SIGNAL ;
-    PORT
-      LAYER M1 ;
-      RECT 0.7 0.4 0.9 0.6 ;
-    END
-  END Y
-END BUF
-END LIBRARY
-"""
-            )
-            def_path.write_text(
-                """VERSION 5.8 ;
-DIVIDERCHAR "/" ;
-BUSBITCHARS "[]" ;
-DESIGN CPU_PR_SMOKE ;
-UNITS DISTANCE MICRONS 1000 ;
-DIEAREA ( 0 0 ) ( 10000 10000 ) ;
-ROW ROW_0 core 0 0 N DO 10 BY 1 STEP 1000 0 ;
-TRACKS Y 500 DO 10 STEP 1000 LAYER M1 ;
-TRACKS X 500 DO 10 STEP 1000 LAYER M2 ;
-COMPONENTS 2 ;
-- U0 BUF + PLACED ( 1000 1000 ) N ;
-- U1 BUF + PLACED ( 8000 8000 ) N ;
-END COMPONENTS
-PINS 0 ;
-END PINS
-SPECIALNETS 0 ;
-END SPECIALNETS
-NETS 1 ;
-- N1 ( U0 Y ) ( U1 A ) ;
-END NETS
-END DESIGN
-"""
-            )
+            lef_path.write_text(TOY_LEF)
+            def_path.write_text(TOY_DEF)
 
             script = f"""
 import importlib.util
@@ -158,13 +75,19 @@ def load_module(name, path):
 io_parser = load_module("io_parser", Path({str(io_parser_candidates[0])!r}))
 gpugr = load_module("gpugr", Path({str(gpugr_candidates[0])!r}))
 assert gpugr.cuda_enabled() is False
-for guarded_backend in ("cpu_pr", "cugr2"):
+for guarded_backend in ("cpu_pr", "cpu_pr_mt", "cugr2"):
     try:
         gpugr.load_gr_params({{"backend": guarded_backend, "rrrIters": 1}})
     except RuntimeError as error:
         assert f"backend={{guarded_backend}}" in str(error), error
     else:
         raise AssertionError(f"{{guarded_backend}} accepted unsupported rrr_iters")
+try:
+    gpugr.load_gr_params({{"backend": "cpu_pr_mt", "rrrIters": 0, "threads": 0}})
+except RuntimeError as error:
+    assert "threads must be positive" in str(error), error
+else:
+    raise AssertionError("cpu_pr_mt accepted a non-positive thread count")
 assert io_parser.load_params({{
     "lef": {str(lef_path)!r},
     "def": {str(def_path)!r},
@@ -184,6 +107,7 @@ gpugr.read_flute(
 assert gpugr.load_gr_params({{
     "backend": {backend!r},
     "rrrIters": 0,
+    "threads": {threads},
     "route_xSize": 8,
     "route_ySize": 8,
     "bottom_routing_layer": "M1",
@@ -191,9 +115,21 @@ assert gpugr.load_gr_params({{
 }})
 grdb = gpugr.create_grdatabase(rawdb, gpdb)
 summary = grdb.grnet_summary()
-assert summary["routeable_net_count"] == 1, summary
+assert summary["routeable_net_count"] == 2, summary
 routeforce = gpugr.create_routeforce(grdb)
 routeforce.run_ggr()
+resolved_backend = gpugr.resolved_backend()
+run_stats = routeforce.run_stats()
+if {backend!r} in ("cpu_pr", "cpu_pr_mt"):
+    assert run_stats["terminal_status"] == "completed", run_stats
+    assert run_stats["requested_workers"] == {threads}, run_stats
+    assert run_stats["effective_workers"] == {expected_workers}, run_stats
+    expected_batch_limit = 4096 if {backend!r} == "cpu_pr_mt" else 250
+    expected_scan_limit = 100 if {backend!r} == "cpu_pr_mt" else 0
+    assert run_stats["batch_size_limit"] == expected_batch_limit, run_stats
+    assert run_stats["batch_conflict_scan_limit"] == expected_scan_limit, run_stats
+if {expected_workers} > 1:
+    assert run_stats["parallel_batch_count"] > 0, run_stats
 maps = routeforce.dmd_map()
 cap_map = routeforce.cap_map()
 raw_wire_map = routeforce.raw_wire_dmd_map()
@@ -201,16 +137,43 @@ assert len(maps) == 3
 assert tuple(maps[0].shape) == (2, 8, 8), maps[0].shape
 assert tuple(cap_map.shape) == (2, 8, 8), cap_map.shape
 assert tuple(raw_wire_map.shape) == (2, 8, 8), raw_wire_map.shape
+if {backend!r} == "cpu_pr_mt":
+    parallel_routes = routeforce.raw_routes()
+    parallel_maps = tuple(route_map.clone() for route_map in maps)
+    assert gpugr.load_gr_params({{
+        "backend": "cpu_pr",
+        "rrrIters": 0,
+        "threads": 1,
+        "route_xSize": 8,
+        "route_ySize": 8,
+        "bottom_routing_layer": "M1",
+        "top_routing_layer": "M2",
+    }})
+    reference_grdb = gpugr.create_grdatabase(rawdb, gpdb)
+    reference = gpugr.create_routeforce(reference_grdb)
+    reference.run_ggr()
+    assert reference.raw_routes() == parallel_routes
+    reference_stats = reference.run_stats()
+    for hash_field in ("route_hash64", "wire_map_hash64", "via_map_hash64"):
+        assert reference_stats[hash_field] == run_stats[hash_field], (
+            hash_field,
+            reference_stats,
+            run_stats,
+        )
+    for reference_map, parallel_map in zip(reference.dmd_map(), parallel_maps):
+        assert torch.equal(reference_map, parallel_map)
 print("CPU_PATTERN_ROUTE=" + json.dumps({{
-    "backend": gpugr.resolved_backend(),
+    "backend": resolved_backend,
     "routes": len(routeforce.route_entries()),
     "dmd_shape": list(maps[0].shape),
+    "effective_workers": run_stats["effective_workers"],
 }}))
 """
             env = os.environ.copy()
             env["LD_LIBRARY_PATH"] = ":".join(
                 [*(str(path) for path in LIBRARY_DIRS), env.get("LD_LIBRARY_PATH", "")]
             )
+            env["XPLACE_FLUTE_LUT_ROOT"] = str(FLUTE_LUT_ROOT)
             result = subprocess.run(
                 [sys.executable, "-c", script],
                 text=True,
@@ -225,11 +188,22 @@ print("CPU_PATTERN_ROUTE=" + json.dumps({{
             )
             self.assertEqual(
                 json.loads(marker.removeprefix("CPU_PATTERN_ROUTE=")),
-                {"backend": backend, "routes": 1, "dmd_shape": [2, 8, 8]},
+                {
+                    "backend": backend,
+                    "routes": 2,
+                    "dmd_shape": [2, 8, 8],
+                    "effective_workers": expected_workers,
+                },
             )
 
     def test_routeable_net_uses_cpu_backend(self):
         self._run_routeable_net("cpu_pr")
+
+    def test_routeable_net_uses_cpu_parallel_backend_plumbing(self):
+        self._run_routeable_net("cpu_pr_mt")
+
+    def test_routeable_nets_use_two_cpu_parallel_workers(self):
+        self._run_routeable_net("cpu_pr_mt", threads=2, expected_workers=2)
 
     def test_routeable_net_uses_cugr2_backend(self):
         self._run_routeable_net("cugr2")
