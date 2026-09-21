@@ -20,12 +20,6 @@ set(
   "${PROJECT_SOURCE_DIR}/cpp_to_py/cpybin"
   CACHE PATH "Directory where Xplace Python extensions are installed"
 )
-set(
-  XPLACE_LICENSE_DIR
-  "${PROJECT_SOURCE_DIR}/licenses/cugr"
-  CACHE PATH "Directory where third-party license files are installed"
-)
-
 set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 set(CMAKE_INSTALL_RPATH "$ORIGIN")
 
@@ -33,8 +27,7 @@ set(CMAKE_INSTALL_RPATH "$ORIGIN")
 add_subdirectory(${PATH_THIRDPARTY_ROOT}/pybind11)
 # pybind11's Python discovery uses the modern ``Python_*`` variables while
 # the legacy Xplace targets consume ``PYTHON_INCLUDE_DIRS``. Bridge both so
-# every Torch/pybind target, including the CPU-only CUGR target, sees Python.h
-# in a clean build.
+# every Torch/pybind target sees Python.h in a clean build.
 if(NOT PYTHON_INCLUDE_DIRS)
   if(Python_INCLUDE_DIRS)
     set(PYTHON_INCLUDE_DIRS ${Python_INCLUDE_DIRS})

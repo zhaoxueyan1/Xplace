@@ -2,7 +2,6 @@
 #include "common/common.h"
 #include "gpugr/db/GRSetting.h"
 #include "gpugr/gr/CPURouter.h"
-#include "gpugr/gr/CUGR2Router.h"
 #if ENABLE_CUDA
 #include "gpugr/gr/GPURouter.h"
 #endif
@@ -84,7 +83,6 @@ private:
     gr::GPURouter router;
 #endif
     gr::CPURouter cpuRouter;
-    gr::CUGR2Router cugr2Router;
     GGRBackend backend = GGRBackend::AUTO;
 };
 

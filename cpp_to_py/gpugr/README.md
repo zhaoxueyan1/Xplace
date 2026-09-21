@@ -22,10 +22,10 @@ Please refer to `cpp_to_py/gpugr/PyBindCppMain.cpp`.
 - `route_xSize` / `route_ySize`: Given GR GridGraph size. If the given size is `0`, use the `GRIDGRAPH` definition in DEF file. If the given size is `0` and there is no definition in DEF, we set it as `512`.
 - `rrrIters`: The number of rip-up and re-route iterations (maze route). If `rrrIters = 0`, perform the pattern route only.
 - `backend`: `cuda` selects the CUDA router, `cpu_pr` selects the serial diagnostic
-  CPU pattern router, `cpu_pr_mt` selects the deterministic parallel CPU pattern
-  router, and `cugr2` selects the explicit CPU CUGR2 route core. All CPU pattern
-  backends require `rrrIters = 0`; they reject positive RRR values instead of
-  silently changing the requested effort. `auto` does not select `cpu_pr_mt`.
+  CPU pattern router, and `cpu_pr_mt` selects the deterministic parallel CPU
+  pattern router. All CPU pattern backends require `rrrIters = 0`; they reject
+  positive RRR values instead of silently changing the requested effort. `auto`
+  does not select `cpu_pr_mt`.
 - `threads`: Requested route workers for `cpu_pr_mt`. The native `run_stats()`
   result reports both requested and effective workers; the latter is clamped by
   hardware concurrency, maximum batch size, and the preflight scratch-memory
@@ -43,7 +43,6 @@ Please refer to `cpp_to_py/gpugr/PyBindCppMain.cpp`.
   unexpected actual wire/via conflict is rerun serially before deterministic
   commit. This bounds cost-map refreshes and avoids speculative duplicate work
   on conflict-heavy designs without concurrent shared-state writes.
-- The legacy Rsyn-backed `cugr` extension is disabled in the default Xplace CPU build; enable it explicitly with `-DXPLACE_BUILD_LEGACY_CUGR=ON` when its separate integration source is available.
 - `csrn_scale`: The size of coarsen grid in maze routing.
 - `route_guide`: The file name of output route guide.
 - `bottom_routing_layer` / `top_routing_layer`: Optional inclusive routing-layer

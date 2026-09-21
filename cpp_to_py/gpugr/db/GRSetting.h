@@ -3,7 +3,7 @@
 
 namespace gr {
 
-enum class GGRBackend { CUDA, CPU_PR, CPU_PR_MT, CUGR2, AUTO };
+enum class GGRBackend { CUDA, CPU_PR, CPU_PR_MT, AUTO };
 
 GGRBackend parseGGRBackend(const std::string& value);
 std::string ggrBackendName(GGRBackend backend);

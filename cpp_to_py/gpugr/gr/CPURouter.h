@@ -24,8 +24,6 @@ public:
                 const std::vector<float>& movRaw);
     void route(std::vector<GrNet>& nets);
     void routeParallel(std::vector<GrNet>& nets, int requestedWorkers);
-    void loadCanonicalRoutes(const std::vector<GrNet>& nets,
-                             const std::vector<std::vector<int>>& canonicalRawRoutes);
 
     std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> getDemandMap();
     torch::Tensor getCapacityMap();

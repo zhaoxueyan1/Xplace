@@ -75,7 +75,7 @@ def load_module(name, path):
 io_parser = load_module("io_parser", Path({str(io_parser_candidates[0])!r}))
 gpugr = load_module("gpugr", Path({str(gpugr_candidates[0])!r}))
 assert gpugr.cuda_enabled() is False
-for guarded_backend in ("cpu_pr", "cpu_pr_mt", "cugr2"):
+for guarded_backend in ("cpu_pr", "cpu_pr_mt"):
     try:
         gpugr.load_gr_params({{"backend": guarded_backend, "rrrIters": 1}})
     except RuntimeError as error:
@@ -204,9 +204,6 @@ print("CPU_PATTERN_ROUTE=" + json.dumps({{
 
     def test_routeable_nets_use_two_cpu_parallel_workers(self):
         self._run_routeable_net("cpu_pr_mt", threads=2, expected_workers=2)
-
-    def test_routeable_net_uses_cugr2_backend(self):
-        self._run_routeable_net("cugr2")
 
 
 if __name__ == "__main__":
