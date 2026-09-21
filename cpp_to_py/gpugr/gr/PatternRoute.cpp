@@ -1,6 +1,8 @@
 #include "PatternRoute.h"
 
 #include <iostream>
+#include <chrono>
+#include <mutex>
 #include <set>
 #include <stdexcept>
 
@@ -11,6 +13,30 @@
 namespace gr {
 
 using namespace Flute;
+
+namespace {
+
+std::mutex fluteMutex;
+
+Tree runFlute(int degree,
+              DTYPE* x,
+              DTYPE* y,
+              double* waitSeconds = nullptr,
+              double* wallSeconds = nullptr) {
+    const auto waitStart = std::chrono::steady_clock::now();
+    std::unique_lock<std::mutex> lock(fluteMutex);
+    const auto callStart = std::chrono::steady_clock::now();
+    if (waitSeconds) {
+        *waitSeconds += std::chrono::duration<double>(callStart - waitStart).count();
+    }
+    Tree tree = flute(degree, x, y, 3);
+    if (wallSeconds) {
+        *wallSeconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - callStart).count();
+    }
+    return tree;
+}
+
+}  // namespace
 
 void prepareSingeNet(gr::GrNet &grNet, int routesOffset, int X, int Y, int N, int LAYER, int DIRECTION) {
     const std::vector<std::vector<int>> &pins = grNet.getPins();
@@ -40,7 +66,7 @@ void prepareSingeNet(gr::GrNet &grNet, int routesOffset, int X, int Y, int N, in
     std::vector<int> x(degree), y(degree);
     for (auto e : loc2Pins) x[cur] = e.first / N, y[cur] = e.first % N, cur++;
 
-    Tree flutetree = flute(degree, x.data(), y.data(), 3);
+    Tree flutetree = runFlute(degree, x.data(), y.data());
 
     robin_hood::unordered_map<int, int> loc2node, node2loc;
     std::set<int> locations;
@@ -268,7 +294,9 @@ int prepare(double &count,
             int Y,
             int N,
             int LAYER,
-            int DIRECTION) {
+            int DIRECTION,
+            double *fluteWaitSeconds,
+            double *fluteWallSeconds) {
     auto &pins = grNet.getPins();
     // std::map<int, std::vector<int>> loc2Pins;
     robin_hood::unordered_map<int, std::vector<int>> loc2Pins;
@@ -299,7 +327,7 @@ int prepare(double &count,
     std::vector<int> x(degree), y(degree);
     for (auto e : loc2Pins) x[cur] = e.first / N, y[cur] = e.first % N, cur++;
 
-    Tree flutetree = flute(degree, x.data(), y.data(), 3);
+    Tree flutetree = runFlute(degree, x.data(), y.data(), fluteWaitSeconds, fluteWallSeconds);
     // count += clock() - startTimer;
     robin_hood::unordered_map<int, int> loc2node, node2loc;
     std::set<int> locations;

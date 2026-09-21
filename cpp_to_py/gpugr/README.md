@@ -21,7 +21,28 @@ Please refer to `cpp_to_py/gpugr/PyBindCppMain.cpp`.
 - `device_id`: GPU id.
 - `route_xSize` / `route_ySize`: Given GR GridGraph size. If the given size is `0`, use the `GRIDGRAPH` definition in DEF file. If the given size is `0` and there is no definition in DEF, we set it as `512`.
 - `rrrIters`: The number of rip-up and re-route iterations (maze route). If `rrrIters = 0`, perform the pattern route only.
-- `backend`: `cuda` selects the CUDA router, `cpu_pr` selects the diagnostic CPU pattern router, and `cugr2` selects the explicit CPU CUGR2 route core. `cpu_pr` and `cugr2` require `rrrIters = 0`; they reject positive RRR values instead of silently changing the requested effort.
+- `backend`: `cuda` selects the CUDA router, `cpu_pr` selects the serial diagnostic
+  CPU pattern router, `cpu_pr_mt` selects the deterministic parallel CPU pattern
+  router, and `cugr2` selects the explicit CPU CUGR2 route core. All CPU pattern
+  backends require `rrrIters = 0`; they reject positive RRR values instead of
+  silently changing the requested effort. `auto` does not select `cpu_pr_mt`.
+- `threads`: Requested route workers for `cpu_pr_mt`. The native `run_stats()`
+  result reports both requested and effective workers; the latter is clamped by
+  hardware concurrency, maximum batch size, and the preflight scratch-memory
+  budget. The same value may be used independently by the parser, so callers
+  should record parser threads separately.
+- `cpu_pr_mt` uses a deterministic CPU scheduler with a 4096-net batch cap and
+  ends a batch after 100 consecutive bbox conflicts. These values are reported
+  as `batch_size_limit` and `batch_conflict_scan_limit`; `cpu_pr` retains its
+  original 250-net, full-scan scheduler and remains the serial oracle. When the
+  conflict limit is reached, the remaining cost-epoch slots are packed
+  deterministically. Each cost epoch uses one cost-map snapshot. Its packed,
+  bbox-conflicting prefix runs serially once; the scheduler-proven
+  conflict-free suffix is split into at most 64-net parallel candidate batches.
+  Candidate generation uses worker-local state, and a candidate batch with an
+  unexpected actual wire/via conflict is rerun serially before deterministic
+  commit. This bounds cost-map refreshes and avoids speculative duplicate work
+  on conflict-heavy designs without concurrent shared-state writes.
 - The legacy Rsyn-backed `cugr` extension is disabled in the default Xplace CPU build; enable it explicitly with `-DXPLACE_BUILD_LEGACY_CUGR=ON` when its separate integration source is available.
 - `csrn_scale`: The size of coarsen grid in maze routing.
 - `route_guide`: The file name of output route guide.
@@ -29,6 +50,47 @@ Please refer to `cpp_to_py/gpugr/PyBindCppMain.cpp`.
   names resolved against the LEF `TYPE ROUTING` stack. Empty values use the
   first/last routing layer. Planar edges and vias outside this interval are
   unavailable to both pattern and maze routing.
+
+## Testing
+
+The CPU router unit tests are plain C++17 programs with no external test
+framework. Build each one from the repository root with `g++` against the
+`cpp_to_py` include root and the matching implementation file:
+
+```bash
+# Batch occupancy invariant checks (header-only implementation).
+g++ -std=c++17 -O2 -Icpp_to_py \
+    -o /tmp/unittest_batch_occupancy \
+    cpp_to_py/gpugr/unittest_batch_occupancy.cpp
+
+# Batch scheduler packing/conflict-limit behavior.
+g++ -std=c++17 -O2 -Icpp_to_py \
+    -o /tmp/unittest_cpu_route_batch_scheduler \
+    cpp_to_py/gpugr/unittest_cpu_route_batch_scheduler.cpp \
+    cpp_to_py/gpugr/gr/CpuRouteBatchScheduler.cpp
+
+# Scratch sizing, resetRegion validation, and checked arithmetic.
+g++ -std=c++17 -O2 -Icpp_to_py \
+    -o /tmp/unittest_cpu_route_types \
+    cpp_to_py/gpugr/unittest_cpu_route_types.cpp \
+    cpp_to_py/gpugr/gr/CpuRouteTypes.cpp
+
+# Worker pool lifecycle and error propagation (requires pthread).
+g++ -std=c++17 -O2 -pthread -Icpp_to_py \
+    -o /tmp/unittest_cpu_route_worker_pool \
+    cpp_to_py/gpugr/unittest_cpu_route_worker_pool.cpp \
+    cpp_to_py/gpugr/gr/CpuRouteWorkerPool.cpp
+```
+
+Each binary returns a zero exit status on success. The worker pool test also
+has a ThreadSanitizer variant for the parallel dispatch paths:
+
+```bash
+g++ -std=c++17 -O1 -g -fsanitize=thread -pthread -Icpp_to_py \
+    -o /tmp/unittest_cpu_route_worker_pool_tsan \
+    cpp_to_py/gpugr/unittest_cpu_route_worker_pool.cpp \
+    cpp_to_py/gpugr/gr/CpuRouteWorkerPool.cpp
+```
 
 ## Citation
 If you find **GGR** useful in your research, please consider to cite:

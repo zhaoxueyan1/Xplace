@@ -72,6 +72,7 @@ public:
     std::tuple<int, int> getRoutingLayerRange() const;
     std::vector<std::string> getRoutingLayerNames() const;
     std::vector<std::vector<int>> getRawRoutes();
+    CpuRouteRunStats getRunStats() const;
     gr::GRDatabase& getGRDatabase();
 
 private:

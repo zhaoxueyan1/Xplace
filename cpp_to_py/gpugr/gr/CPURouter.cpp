@@ -1,11 +1,15 @@
 #include "CPURouter.h"
 
+#include "gpugr/gr/CpuRouteWorkerPool.h"
 #include "gpugr/gr/PatternRoute.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <limits>
 #include <stdexcept>
+#include <unordered_set>
+#include <utility>
 
 namespace gr {
 
@@ -30,9 +34,52 @@ inline int boundedExp2(float x) {
     return 1 << std::min(30, shift);
 }
 
+using SteadyClock = std::chrono::steady_clock;
+
+double elapsedSeconds(const SteadyClock::time_point& start) {
+    return std::chrono::duration<double>(SteadyClock::now() - start).count();
+}
+
+std::size_t checkedBufferSize(std::size_t count, std::size_t scale, std::size_t extra = 0) {
+    if (count > (std::numeric_limits<std::size_t>::max() - extra) / scale) {
+        throw std::overflow_error("CPU pattern-routing preparation buffer size overflow");
+    }
+    return count * scale + extra;
+}
+
+void hashWord(uint64_t value, uint64_t& hash) {
+    constexpr uint64_t FNV_PRIME = 1099511628211ULL;
+    for (int byte = 0; byte < 8; ++byte) {
+        hash ^= (value >> (byte * 8)) & 0xffULL;
+        hash *= FNV_PRIME;
+    }
+}
+
+uint64_t hashIntVector(const std::vector<int>& values) {
+    uint64_t hash = 1469598103934665603ULL;
+    hashWord(values.size(), hash);
+    for (int value : values) {
+        hashWord(static_cast<uint64_t>(static_cast<int64_t>(value)), hash);
+    }
+    return hash;
+}
+
+uint64_t hashRawRoutes(const std::vector<std::vector<int>>& routes) {
+    uint64_t hash = 1469598103934665603ULL;
+    hashWord(routes.size(), hash);
+    for (const auto& route : routes) {
+        hashWord(route.size(), hash);
+        for (int value : route) {
+            hashWord(static_cast<uint64_t>(static_cast<int64_t>(value)), hash);
+        }
+    }
+    return hash;
+}
+
 }  // namespace
 
-void CPURouter::initialize(const gr::GRDatabase& grdb) {
+void CPURouter::initialize(const gr::GRDatabase& grdb, const std::string& backendName) {
+    diagnosticBackend = backendName;
     LAYER = grdb.nLayers;
     N = grdb.nMaxGrid;
     X = grdb.xSize;
@@ -78,7 +125,8 @@ void CPURouter::setMap(const std::vector<float>& cap,
         static_cast<int>(fix.size()) < gridGraphSize ||
         static_cast<int>(fixRaw.size()) < gridGraphSize ||
         static_cast<int>(movRaw.size()) < gridGraphSize) {
-        throw std::runtime_error("backend=cpu_pr operation=setMap missing required GR database map data");
+        throw std::runtime_error("backend=" + diagnosticBackend +
+                                 " operation=setMap missing required GR database map data");
     }
     capacity = cap;
     wireDist = wir;
@@ -90,7 +138,8 @@ void CPURouter::setMap(const std::vector<float>& cap,
 
 int CPURouter::encodedIndex(int layer, int x, int y) const {
     if (layer < 0 || layer >= LAYER || x < 0 || x >= X || y < 0 || y >= Y) {
-        throw std::runtime_error("backend=cpu_pr operation=route generated segment outside legal grid");
+        throw std::runtime_error("backend=" + diagnosticBackend +
+                                 " operation=route generated segment outside legal grid");
     }
     if (!((layer & 1) ^ DIRECTION)) {
         std::swap(x, y);
@@ -213,6 +262,36 @@ void CPURouter::calculateCostSum() {
     }
 }
 
+void CPURouter::calculateCostMapsParallel(CpuRouteWorkerPool& workerPool, int workers) {
+    const int gridGraphSize = LAYER * N * N;
+    const std::size_t jobCount = static_cast<std::size_t>(std::max(1, workers)) * 8;
+    const std::size_t chunkSize =
+        (static_cast<std::size_t>(gridGraphSize) + jobCount - 1) / jobCount;
+    workerPool.run(jobCount, [&](int, std::size_t jobId) {
+        const std::size_t begin = jobId * chunkSize;
+        const std::size_t end = std::min(
+            static_cast<std::size_t>(gridGraphSize), begin + chunkSize);
+        for (std::size_t idx = begin; idx < end; ++idx) {
+            cost[idx] = calcWireCost(static_cast<int>(idx));
+            viaCostMap[idx] = calcViaCost(static_cast<int>(idx));
+        }
+    });
+}
+
+void CPURouter::calculateCostSumParallel(CpuRouteWorkerPool& workerPool) {
+    const std::size_t rowCount = static_cast<std::size_t>(std::max(0, LAYER - 1)) * N;
+    workerPool.run(rowCount, [&](int, std::size_t rowId) {
+        const int layer = static_cast<int>(rowId / static_cast<std::size_t>(N)) + 1;
+        const int row = static_cast<int>(rowId % static_cast<std::size_t>(N));
+        int64_t running = 0;
+        for (int col = N - 1; col >= 0; --col) {
+            const int idx = layer * N * N + row * N + col;
+            running += cost[idx];
+            costSum[idx] = running;
+        }
+    });
+}
+
 void CPURouter::viaSweep(std::vector<int64_t>& map,
                          std::vector<int>& prev,
                          std::vector<int>& midScratch,
@@ -256,55 +335,89 @@ void CPURouter::viaSweep(std::vector<int64_t>& map,
     }
 }
 
-void CPURouter::appendWire(std::vector<int>& rawRoute, int from, int to) {
+void CPURouter::appendWire(CpuRouteCandidate& candidate, int from, int to) const {
     if (from == to) {
         return;
     }
     const int fromLayer = from / N / N;
     const int toLayer = to / N / N;
     if (fromLayer != toLayer || !isRoutingLayerEnabled(fromLayer)) {
-        throw std::runtime_error("backend=cpu_pr operation=route generated wire outside GPUGR routing layer range");
+        throw std::runtime_error("backend=" + diagnosticBackend +
+                                 " operation=route generated wire outside GPUGR routing layer range");
     }
     int lo = std::min(from, to);
     int hi = std::max(from, to);
-    rawRoute.push_back(lo);
-    rawRoute.push_back(hi - lo);
-    for (int idx = lo; idx < hi; ++idx) {
-        wires[idx] += 1;
-    }
+    candidate.rawRoute.push_back(lo);
+    candidate.rawRoute.push_back(hi - lo);
+    candidate.wireDeltas.emplace_back(lo, hi - lo);
 }
 
-void CPURouter::appendVia(std::vector<int>& rawRoute, int encoded) {
+void CPURouter::appendVia(CpuRouteCandidate& candidate, int encoded) const {
     const int lowerLayer = encoded / N / N;
     if (!isRoutingLayerEnabled(lowerLayer) || !isRoutingLayerEnabled(lowerLayer + 1)) {
-        throw std::runtime_error("backend=cpu_pr operation=route generated via outside GPUGR routing layer range");
+        throw std::runtime_error("backend=" + diagnosticBackend +
+                                 " operation=route generated via outside GPUGR routing layer range");
     }
-    rawRoute.push_back(encoded);
-    rawRoute.push_back(-1);
-    vias[encoded] += 1;
+    candidate.rawRoute.push_back(encoded);
+    candidate.rawRoute.push_back(-1);
+    candidate.viaDeltas.push_back(encoded);
 }
 
-void CPURouter::routePreparedNet(const std::vector<int>& pointsBuffer, std::vector<int>& rawRoute) {
-    rawRoute.clear();
-    rawRoute.push_back(1);
+void CPURouter::routePreparedNet(const std::vector<int>& pointsBuffer,
+                                 CpuRouteScratch& scratch,
+                                 CpuRouteCandidate& candidate,
+                                 bool resetOnlyRouteRegion) const {
+    candidate.status = CpuRouteStatus::NoRoute;
+    candidate.rawRoute.clear();
+    candidate.wireDeltas.clear();
+    candidate.viaDeltas.clear();
+    candidate.rawRoute.push_back(1);
     if (pointsBuffer.size() < 2) {
+        candidate.status = CpuRouteStatus::Routed;
         return;
     }
 
     const int firstRoutingLayer = std::max(1, routingLayerBegin);
     const int lastRoutingLayer = std::min(LAYER - 1, routingLayerEnd);
     if (firstRoutingLayer > lastRoutingLayer) {
-        rawRoute[0] = -1;
+        candidate.rawRoute[0] = -1;
         return;
     }
 
     const int stride = LAYER * N * N;
     int nodeCnt = pointsBuffer[1];
+    if (nodeCnt <= 0 || static_cast<std::size_t>(nodeCnt) >
+                            (pointsBuffer.size() - 2) / static_cast<std::size_t>(6)) {
+        throw std::runtime_error("backend=" + diagnosticBackend +
+                                 " operation=route invalid prepared point count");
+    }
     const int* points = pointsBuffer.data() + 2;
-    std::vector<int64_t> map(6 * stride, PR_INF);
-    std::vector<int> prev(14 * stride, 0);
+    if (resetOnlyRouteRegion) {
+        int xl = X;
+        int xh = -1;
+        int yl = Y;
+        int yh = -1;
+        for (int node = 0; node < nodeCnt; ++node) {
+            const int location = points[node * 6];
+            const int x = location / N;
+            const int y = location % N;
+            if (x < 0 || x >= X || y < 0 || y >= Y) {
+                throw std::runtime_error("backend=" + diagnosticBackend +
+                                         " operation=route prepared point outside route grid");
+            }
+            xl = std::min(xl, x);
+            xh = std::max(xh, x);
+            yl = std::min(yl, y);
+            yh = std::max(yh, y);
+        }
+        scratch.resetRegion(LAYER, N, DIRECTION, xl, xh, yl, yh, PR_INF);
+    } else {
+        scratch.reset(static_cast<std::size_t>(stride), PR_INF);
+    }
+    std::vector<int64_t>& map = scratch.map;
+    std::vector<int>& prev = scratch.prev;
     std::vector<int>& prev2 = prev;
-    std::vector<int> midScratch(stride, 0);
+    std::vector<int>& midScratch = scratch.mid;
 
     for (int t = 6 * (nodeCnt - 1); t >= 0; t -= 6) {
         int tox = points[t] / N;
@@ -535,7 +648,7 @@ void CPURouter::routePreparedNet(const std::vector<int>& pointsBuffer, std::vect
         }
     }
     if (!isFinitePatternCost(minTotalDist)) {
-        rawRoute[0] = -1;
+        candidate.rawRoute[0] = -1;
         return;
     }
 
@@ -549,7 +662,7 @@ void CPURouter::routePreparedNet(const std::vector<int>& pointsBuffer, std::vect
         int maxlayer = best / LAYER / LAYER / LAYER % LAYER;
         for (int viaLayer = minlayer; viaLayer < maxlayer; ++viaLayer) {
             int id = viaLayer * N * N + (((viaLayer & 1) ^ DIRECTION) ? x * N + y : y * N + x);
-            appendVia(rawRoute, id);
+            appendVia(candidate, id);
         }
         int bestpos = best;
         for (int j = 0; j < 3; ++j) {
@@ -578,15 +691,15 @@ void CPURouter::routePreparedNet(const std::vector<int>& pointsBuffer, std::vect
                 int p1 = ((entrylayer & 1) ^ DIRECTION) ? entry - y + midy : entry - x + midx;
                 int p3 = ((midlayer & 1) ^ DIRECTION) ? mid - midy + lasty : mid - midx + lastx;
                 int p4 = ((lastlayer & 1) ^ DIRECTION) ? last - lasty + midy : last - lastx + midx;
-                appendWire(rawRoute, entry, p1);
+                appendWire(candidate, entry, p1);
                 if (p1 != mid) {
                     for (int viaLayer = std::min(entrylayer, midlayer); viaLayer < std::max(entrylayer, midlayer);
                          ++viaLayer) {
                         int id = viaLayer * N * N + (((viaLayer & 1) ^ DIRECTION) ? midx * N + midy : midy * N + midx);
-                        appendVia(rawRoute, id);
+                        appendVia(candidate, id);
                     }
                 }
-                appendWire(rawRoute, mid, p3);
+                appendWire(candidate, mid, p3);
                 if (p3 != p4) {
                     int tempx = p3 / N % N;
                     int tempy = p3 % N;
@@ -596,89 +709,43 @@ void CPURouter::routePreparedNet(const std::vector<int>& pointsBuffer, std::vect
                     for (int viaLayer = std::min(midlayer, lastlayer); viaLayer < std::max(midlayer, lastlayer);
                          ++viaLayer) {
                         int id = viaLayer * N * N + (((viaLayer & 1) ^ DIRECTION) ? tempx * N + tempy : tempy * N + tempx);
-                        appendVia(rawRoute, id);
+                        appendVia(candidate, id);
                     }
                 }
-                appendWire(rawRoute, p4, last);
+                appendWire(candidate, p4, last);
             } else {
-                appendWire(rawRoute, last, entry);
+                appendWire(candidate, last, entry);
             }
             map[5 * stride + child] = lastlayer;
         }
     }
-    rawRoute[0] = static_cast<int>(rawRoute.size());
+    if (candidate.rawRoute.size() > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+        throw std::overflow_error("backend=" + diagnosticBackend +
+                                  " operation=route raw route exceeds INT_MAX entries");
+    }
+    candidate.rawRoute[0] = static_cast<int>(candidate.rawRoute.size());
+    candidate.status = CpuRouteStatus::Routed;
 }
 
-std::vector<int> CPURouter::buildRoutingOrder(const std::vector<GrNet>& nets, std::vector<int>& batchSizes) const {
-    std::vector<int> sorted;
-    sorted.reserve(nets.size());
+CpuRouteBatchSchedule CPURouter::buildRoutingOrder(const std::vector<GrNet>& nets,
+                                                   int conflictScanLimit,
+                                                   int batchSizeLimit,
+                                                   bool packConflictTail) const {
+    std::vector<CpuRouteBox> boxes;
+    boxes.reserve(nets.size());
     for (int netId = 0; netId < static_cast<int>(nets.size()); ++netId) {
         if (!nets[netId].noroute) {
-            sorted.push_back(netId);
+            const auto& net = nets[netId];
+            if (net.lowerx < 0 || net.lowery < 0 || net.upperx >= X || net.uppery >= Y ||
+                net.lowerx > net.upperx || net.lowery > net.uppery) {
+                throw std::runtime_error("backend=" + diagnosticBackend +
+                                         " operation=batch net bbox outside route grid");
+            }
+            boxes.push_back({netId, net.lowerx, net.upperx, net.lowery, net.uppery});
         }
     }
-    std::sort(sorted.begin(), sorted.end(), [&](int lhs, int rhs) {
-        int areaL = (nets[lhs].upperx - nets[lhs].lowerx + 1) * (nets[lhs].uppery - nets[lhs].lowery + 1);
-        int areaR = (nets[rhs].upperx - nets[rhs].lowerx + 1) * (nets[rhs].uppery - nets[rhs].lowery + 1);
-        if (areaL == areaR) {
-            return lhs > rhs;
-        }
-        return areaL > areaR;
-    });
-
-    std::vector<short> vis(2000 * 2000, 0);
-    auto hasConflict = [&](int netId) {
-        const auto& net = nets[netId];
-        for (int x = std::max(0, net.lowerx); x <= net.upperx; ++x) {
-            for (int y = std::max(0, net.lowery); y <= net.uppery; ++y) {
-                if (x < 2000 && y < 2000 && vis[x * 2000 + y]) {
-                    return true;
-                }
-            }
-        }
-        return false;
-    };
-    auto setNet = [&](int netId, short value) {
-        const auto& net = nets[netId];
-        for (int x = std::max(0, net.lowerx); x <= net.upperx; ++x) {
-            for (int y = std::max(0, net.lowery); y <= net.uppery; ++y) {
-                if (x < 2000 && y < 2000) {
-                    vis[x * 2000 + y] = value;
-                }
-            }
-        }
-    };
-
-    std::vector<int> order;
-    order.reserve(sorted.size());
-    batchSizes.clear();
-    int lastUnroute = 0;
-    while (order.size() < sorted.size()) {
-        int start = static_cast<int>(order.size());
-        for (size_t i = static_cast<size_t>(lastUnroute); i < sorted.size(); ++i) {
-            if (sorted[i] == -1) {
-                continue;
-            }
-            if (!hasConflict(sorted[i])) {
-                order.push_back(sorted[i]);
-                setNet(sorted[i], 1);
-                sorted[i] = -1;
-            }
-            if (static_cast<int>(order.size()) - start == 250) {
-                break;
-            }
-        }
-        while (lastUnroute < static_cast<int>(sorted.size()) && sorted[lastUnroute] == -1) {
-            ++lastUnroute;
-        }
-        for (int i = start; i < static_cast<int>(order.size()); ++i) {
-            setNet(order[i], 0);
-        }
-        batchSizes.push_back(static_cast<int>(order.size()) - start);
-    }
-    std::reverse(batchSizes.begin(), batchSizes.end());
-    std::reverse(order.begin(), order.end());
-    return order;
+    return buildCpuRouteBatchSchedule(
+        std::move(boxes), X, Y, conflictScanLimit, batchSizeLimit, packConflictTail);
 }
 
 void CPURouter::setNetRouteFromRaw(GrNet& net, const std::vector<int>& rawRoute) const {
@@ -700,6 +767,76 @@ void CPURouter::setNetRouteFromRaw(GrNet& net, const std::vector<int>& rawRoute)
     }
     net.setWires(netWires);
     net.setVias(netVias);
+}
+
+void CPURouter::commitCandidate(GrNet& net, const CpuRouteCandidate& candidate) {
+    if (candidate.netId < 0 || candidate.netId >= static_cast<int>(rawRoutes.size())) {
+        throw std::runtime_error("backend=" + diagnosticBackend +
+                                 " operation=commit candidate net id outside route table");
+    }
+    for (const auto& [start, span] : candidate.wireDeltas) {
+        if (start < 0 || span <= 0 || start > static_cast<int>(wires.size()) - span) {
+            throw std::runtime_error("backend=" + diagnosticBackend +
+                                     " operation=commit wire delta outside route grid");
+        }
+        for (int offset = 0; offset < span; ++offset) {
+            ++wires[start + offset];
+        }
+    }
+    for (int encoded : candidate.viaDeltas) {
+        if (encoded < 0 || encoded >= static_cast<int>(vias.size())) {
+            throw std::runtime_error("backend=" + diagnosticBackend +
+                                     " operation=commit via delta outside route grid");
+        }
+        ++vias[encoded];
+    }
+    rawRoutes[candidate.netId] = candidate.rawRoute;
+    setNetRouteFromRaw(net, candidate.rawRoute);
+}
+
+bool CPURouter::batchHasResourceConflict(
+    const std::vector<GrNet>& nets,
+    const std::vector<CpuRouteCandidate>& candidates,
+    std::size_t begin,
+    std::size_t end) const {
+    if (begin > end || end > candidates.size()) {
+        throw std::out_of_range("CPU pattern-routing candidate range is invalid");
+    }
+    std::unordered_set<uint64_t> resources;
+    for (std::size_t candidateId = begin; candidateId < end; ++candidateId) {
+        const auto& candidate = candidates[candidateId];
+        if (candidate.netId < 0 || candidate.netId >= static_cast<int>(nets.size())) {
+            return true;
+        }
+        const auto& net = nets[candidate.netId];
+        auto inNetBox = [&](int encoded) {
+            const auto [layer, x, y] = decodeIndex(encoded);
+            return layer >= 0 && layer < LAYER && x >= net.lowerx && x <= net.upperx &&
+                   y >= net.lowery && y <= net.uppery;
+        };
+        for (const auto& [start, span] : candidate.wireDeltas) {
+            if (start < 0 || span <= 0 || start > static_cast<int>(wires.size()) - span ||
+                !inNetBox(start) || !inNetBox(start + span)) {
+                return true;
+            }
+            for (int offset = 0; offset < span; ++offset) {
+                const uint64_t key = static_cast<uint64_t>(start + offset) << 1;
+                if (!resources.insert(key).second) {
+                    return true;
+                }
+            }
+        }
+        for (int encoded : candidate.viaDeltas) {
+            if (encoded < 0 || encoded >= static_cast<int>(vias.size()) || !inNetBox(encoded)) {
+                return true;
+            }
+            const uint64_t key = (static_cast<uint64_t>(encoded) << 1) | uint64_t{1};
+            if (!resources.insert(key).second) {
+                return true;
+            }
+        }
+    }
+    return false;
 }
 
 void CPURouter::markOverflowNets(const std::vector<GrNet>& nets) {
@@ -745,27 +882,53 @@ void CPURouter::markOverflowNets(const std::vector<GrNet>& nets) {
 }
 
 void CPURouter::route(std::vector<GrNet>& nets) {
+    const auto totalStart = SteadyClock::now();
+    runStats = CpuRouteRunStats{};
+    runStats.terminalStatus = "running";
     rawRoutes.clear();
     rawRoutes.resize(nets.size());
     std::vector<int> pinNum(nets.size(), 0);
     std::vector<int> routeOffsets(nets.size() + 1, 0);
     for (int netId = 0; netId < static_cast<int>(nets.size()); ++netId) {
+        if (nets[netId].getPins().size() > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+            throw std::overflow_error("backend=" + diagnosticBackend +
+                                      " operation=prepare pin count exceeds INT_MAX");
+        }
         pinNum[netId] = static_cast<int>(nets[netId].getPins().size());
-        routeOffsets[netId + 1] = routeOffsets[netId] + pinNum[netId] * MAX_ROUTE_LEN_PER_PIN;
+        const int64_t nextOffset = static_cast<int64_t>(routeOffsets[netId]) +
+                                   static_cast<int64_t>(pinNum[netId]) * MAX_ROUTE_LEN_PER_PIN;
+        if (nextOffset > std::numeric_limits<int>::max()) {
+            throw std::overflow_error("backend=" + diagnosticBackend +
+                                      " operation=prepare route offset exceeds INT_MAX");
+        }
+        routeOffsets[netId + 1] = static_cast<int>(nextOffset);
     }
 
-    std::vector<int> batchSizes;
-    std::vector<int> order = buildRoutingOrder(nets, batchSizes);
+    const auto scheduleStart = SteadyClock::now();
+    CpuRouteBatchSchedule schedule =
+        buildRoutingOrder(nets, 0, runStats.batchSizeLimit, false);
+    runStats.batchScheduleSeconds = elapsedSeconds(scheduleStart);
+    runStats.batchCount = static_cast<int>(schedule.batchSizes.size());
+    runStats.candidateBatchCount = runStats.batchCount;
+    runStats.candidateBatchSizeLimit = runStats.batchSizeLimit;
+    for (int batchSize : schedule.batchSizes) {
+        runStats.maxBatchSize = std::max(runStats.maxBatchSize, batchSize);
+    }
+    CpuRouteScratch scratch;
     int start = 0;
-    for (int batchSize : batchSizes) {
+    for (int batchSize : schedule.batchSizes) {
+        const auto costStart = SteadyClock::now();
         calculateCostMaps();
         calculateCostSum();
+        runStats.costMapSeconds += elapsedSeconds(costStart);
         int gbPinOffset = batchSize;
         for (int batchIdx = 0; batchIdx < batchSize; ++batchIdx) {
-            int netId = order[start + batchIdx];
-            std::vector<int> points(2 + std::max(1, pinNum[netId] * 4) * 12, 0);
-            std::vector<int> gbpoints(std::max(1, pinNum[netId] * 4), -1);
+            int netId = schedule.netOrder[start + batchIdx];
+            const std::size_t pinCount = static_cast<std::size_t>(std::max(1, pinNum[netId]));
+            std::vector<int> points(checkedBufferSize(pinCount, 48, 2), 0);
+            std::vector<int> gbpoints(checkedBufferSize(pinCount, 4), -1);
             double prepareTime = 0.0;
+            const auto prepareStart = SteadyClock::now();
             int len = prepare(prepareTime,
                               nets[netId],
                               points.data(),
@@ -778,10 +941,23 @@ void CPURouter::route(std::vector<GrNet>& nets) {
                               Y,
                               N,
                               LAYER,
-                              DIRECTION);
+                              DIRECTION,
+                              &runStats.fluteWaitSeconds,
+                              &runStats.fluteWallSeconds);
             points.resize(len);
-            routePreparedNet(points, rawRoutes[netId]);
-            setNetRouteFromRaw(nets[netId], rawRoutes[netId]);
+            runStats.prepareSeconds += elapsedSeconds(prepareStart);
+
+            CpuRouteCandidate candidate;
+            candidate.batchOrdinal = batchIdx;
+            candidate.netId = netId;
+            const auto candidateStart = SteadyClock::now();
+            routePreparedNet(points, scratch, candidate, false);
+            runStats.candidateSeconds += elapsedSeconds(candidateStart);
+            runStats.scratchBytesPerWorker = std::max(runStats.scratchBytesPerWorker, scratch.bytes());
+
+            const auto commitStart = SteadyClock::now();
+            commitCandidate(nets[netId], candidate);
+            runStats.commitSeconds += elapsedSeconds(commitStart);
         }
         start += batchSize;
     }
@@ -793,7 +969,225 @@ void CPURouter::route(std::vector<GrNet>& nets) {
             nets[netId].setVias({});
         }
     }
+    const auto overflowStart = SteadyClock::now();
     markOverflowNets(nets);
+    runStats.overflowMarkSeconds = elapsedSeconds(overflowStart);
+    runStats.routeHash64 = hashRawRoutes(rawRoutes);
+    runStats.wireMapHash64 = hashIntVector(wires);
+    runStats.viaMapHash64 = hashIntVector(vias);
+    runStats.totalSeconds = elapsedSeconds(totalStart);
+    runStats.terminalStatus = "completed";
+}
+
+void CPURouter::routeParallel(std::vector<GrNet>& nets, int requestedWorkers) {
+    const auto totalStart = SteadyClock::now();
+    runStats = CpuRouteRunStats{};
+    runStats.requestedWorkers = requestedWorkers;
+    runStats.workerClampReason = "none";
+    runStats.terminalStatus = "running";
+    rawRoutes.assign(nets.size(), {});
+
+    std::vector<int> pinNum(nets.size(), 0);
+    for (int netId = 0; netId < static_cast<int>(nets.size()); ++netId) {
+        if (nets[netId].getPins().size() > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+            throw std::overflow_error("backend=" + diagnosticBackend +
+                                      " operation=prepare pin count exceeds INT_MAX");
+        }
+        pinNum[netId] = static_cast<int>(nets[netId].getPins().size());
+    }
+
+    constexpr int PARALLEL_CONFLICT_SCAN_LIMIT = 100;
+    constexpr int PARALLEL_BATCH_SIZE_LIMIT = 4096;
+    constexpr int PARALLEL_CANDIDATE_BATCH_SIZE_LIMIT = 64;
+    runStats.batchConflictScanLimit = PARALLEL_CONFLICT_SCAN_LIMIT;
+    runStats.batchSizeLimit = PARALLEL_BATCH_SIZE_LIMIT;
+    runStats.candidateBatchSizeLimit = PARALLEL_CANDIDATE_BATCH_SIZE_LIMIT;
+    const auto scheduleStart = SteadyClock::now();
+    CpuRouteBatchSchedule schedule = buildRoutingOrder(
+        nets, PARALLEL_CONFLICT_SCAN_LIMIT, PARALLEL_BATCH_SIZE_LIMIT, true);
+    runStats.batchScheduleSeconds = elapsedSeconds(scheduleStart);
+    runStats.batchCount = static_cast<int>(schedule.batchSizes.size());
+    runStats.packedConflictBatchCount = static_cast<int>(std::count(
+        schedule.packedConflictBatches.begin(), schedule.packedConflictBatches.end(), uint8_t{1}));
+    for (int batchSize : schedule.batchSizes) {
+        runStats.maxBatchSize = std::max(runStats.maxBatchSize, batchSize);
+    }
+
+    const std::size_t stride = static_cast<std::size_t>(LAYER) * static_cast<std::size_t>(N) *
+                               static_cast<std::size_t>(N);
+    if (stride == 0 || stride > std::numeric_limits<std::size_t>::max() /
+                                    (6 * sizeof(int64_t) + 15 * sizeof(int))) {
+        throw std::overflow_error("backend=" + diagnosticBackend +
+                                  " operation=setup scratch size overflow");
+    }
+    runStats.scratchBytesPerWorker = stride * (6 * sizeof(int64_t) + 15 * sizeof(int));
+    const CpuWorkerLimit workerLimit =
+        chooseCpuRouteWorkers(requestedWorkers, runStats.maxBatchSize, runStats.scratchBytesPerWorker);
+    runStats.effectiveWorkers = workerLimit.effectiveWorkers;
+    runStats.memoryBudgetBytes = workerLimit.memoryBudgetBytes;
+    runStats.workerClampReason = workerLimit.clampReason;
+    logger.info(
+        "CPU PR MT scheduler: requested_workers=%d effective_workers=%d batches=%d max_batch=%d "
+        "batch_limit=%d conflict_scan_limit=%d scratch_bytes_per_worker=%zu clamp=%s",
+        runStats.requestedWorkers,
+        runStats.effectiveWorkers,
+        runStats.batchCount,
+        runStats.maxBatchSize,
+        runStats.batchSizeLimit,
+        runStats.batchConflictScanLimit,
+        runStats.scratchBytesPerWorker,
+        runStats.workerClampReason.c_str());
+
+    CpuRouteWorkerPool workerPool(runStats.effectiveWorkers);
+    std::vector<CpuRouteScratch> scratches(static_cast<std::size_t>(runStats.effectiveWorkers));
+    int start = 0;
+    int batchId = 0;
+    for (int batchSize : schedule.batchSizes) {
+        const int conflictFreeNetCount =
+            schedule.conflictFreeNetCounts[static_cast<std::size_t>(batchId)];
+        const std::size_t parallelBegin =
+            static_cast<std::size_t>(batchSize - conflictFreeNetCount);
+        const auto costStart = SteadyClock::now();
+        calculateCostMapsParallel(workerPool, runStats.effectiveWorkers);
+        calculateCostSumParallel(workerPool);
+        runStats.costMapSeconds += elapsedSeconds(costStart);
+
+        std::vector<std::vector<int>> prepared(static_cast<std::size_t>(batchSize));
+        std::vector<CpuRouteCandidate> candidates(static_cast<std::size_t>(batchSize));
+        std::vector<double> fluteWaitTimes(static_cast<std::size_t>(batchSize), 0.0);
+        std::vector<double> fluteWallTimes(static_cast<std::size_t>(batchSize), 0.0);
+        for (int batchIdx = 0; batchIdx < batchSize; ++batchIdx) {
+            candidates[static_cast<std::size_t>(batchIdx)].batchOrdinal = batchIdx;
+            candidates[static_cast<std::size_t>(batchIdx)].netId =
+                schedule.netOrder[start + batchIdx];
+        }
+        const auto prepareStart = SteadyClock::now();
+        workerPool.run(static_cast<std::size_t>(batchSize), [&](int, std::size_t batchIdx) {
+            const int netId = candidates[batchIdx].netId;
+            auto& points = prepared[batchIdx];
+            const std::size_t pinCount = static_cast<std::size_t>(std::max(1, pinNum[netId]));
+            points.assign(checkedBufferSize(pinCount, 48, 2), 0);
+            std::vector<int> gbpoints(checkedBufferSize(pinCount, 4), -1);
+            double prepareTime = 0.0;
+            int unusedGbPinOffset = 0;
+            try {
+                const int len = prepare(prepareTime,
+                                        nets[netId],
+                                        points.data(),
+                                        0,
+                                        gbpoints.data(),
+                                        unusedGbPinOffset,
+                                        points.size(),
+                                        gbpoints.size(),
+                                        X,
+                                        Y,
+                                        N,
+                                        LAYER,
+                                        DIRECTION,
+                                        &fluteWaitTimes[batchIdx],
+                                        &fluteWallTimes[batchIdx]);
+                points.resize(static_cast<std::size_t>(len));
+            } catch (const std::exception& error) {
+                throw std::runtime_error(
+                    "backend=" + diagnosticBackend + " operation=parallel_prepare net_id=" +
+                    std::to_string(netId) + ": " + error.what());
+            }
+        });
+        for (std::size_t batchIdx = 0; batchIdx < static_cast<std::size_t>(batchSize); ++batchIdx) {
+            runStats.fluteWaitSeconds += fluteWaitTimes[batchIdx];
+            runStats.fluteWallSeconds += fluteWallTimes[batchIdx];
+        }
+        runStats.prepareSeconds += elapsedSeconds(prepareStart);
+
+        if (parallelBegin > 0) {
+            ++runStats.serialFallbackBatchCount;
+            const auto fallbackStart = SteadyClock::now();
+            for (std::size_t batchIdx = 0; batchIdx < parallelBegin; ++batchIdx) {
+                routePreparedNet(
+                    prepared[batchIdx], scratches.front(), candidates[batchIdx], true);
+            }
+            runStats.serialFallbackSeconds += elapsedSeconds(fallbackStart);
+            const auto commitStart = SteadyClock::now();
+            for (std::size_t batchIdx = 0; batchIdx < parallelBegin; ++batchIdx) {
+                const auto& candidate = candidates[batchIdx];
+                commitCandidate(nets[candidate.netId], candidate);
+            }
+            runStats.commitSeconds += elapsedSeconds(commitStart);
+        }
+
+        for (std::size_t candidateBegin = parallelBegin;
+             candidateBegin < static_cast<std::size_t>(batchSize);
+             candidateBegin += PARALLEL_CANDIDATE_BATCH_SIZE_LIMIT) {
+            const std::size_t candidateEnd = std::min(
+                static_cast<std::size_t>(batchSize),
+                candidateBegin + static_cast<std::size_t>(PARALLEL_CANDIDATE_BATCH_SIZE_LIMIT));
+            const auto candidateStart = SteadyClock::now();
+            workerPool.run(
+                candidateEnd - candidateBegin, [&](int workerId, std::size_t localCandidateId) {
+                    const std::size_t batchIdx = candidateBegin + localCandidateId;
+                    try {
+                        routePreparedNet(prepared[batchIdx],
+                                         scratches[static_cast<std::size_t>(workerId)],
+                                         candidates[batchIdx],
+                                         true);
+                    } catch (const std::exception& error) {
+                        throw std::runtime_error(
+                            "backend=" + diagnosticBackend +
+                            " operation=parallel_route net_id=" +
+                            std::to_string(candidates[batchIdx].netId) + ": " + error.what());
+                    }
+                });
+            runStats.candidateSeconds += elapsedSeconds(candidateStart);
+            ++runStats.candidateBatchCount;
+            if (runStats.effectiveWorkers > 1 && candidateEnd - candidateBegin > 1) {
+                ++runStats.parallelBatchCount;
+            }
+
+            if (batchHasResourceConflict(nets, candidates, candidateBegin, candidateEnd)) {
+                ++runStats.conflictBatchCount;
+                ++runStats.serialFallbackBatchCount;
+                const auto fallbackStart = SteadyClock::now();
+                for (std::size_t batchIdx = candidateBegin; batchIdx < candidateEnd; ++batchIdx) {
+                    auto& candidate = candidates[batchIdx];
+                    routePreparedNet(prepared[batchIdx],
+                                     scratches.front(),
+                                     candidate,
+                                     true);
+                }
+                runStats.serialFallbackSeconds += elapsedSeconds(fallbackStart);
+            }
+            const auto commitStart = SteadyClock::now();
+            for (std::size_t batchIdx = candidateBegin; batchIdx < candidateEnd; ++batchIdx) {
+                const auto& candidate = candidates[batchIdx];
+                commitCandidate(nets[candidate.netId], candidate);
+            }
+            runStats.commitSeconds += elapsedSeconds(commitStart);
+        }
+        start += batchSize;
+        ++batchId;
+        if (batchId % 100 == 0 || batchId == runStats.batchCount) {
+            logger.info("CPU PR MT progress: batch=%d/%d routed_nets=%d",
+                        batchId,
+                        runStats.batchCount,
+                        start);
+        }
+    }
+
+    for (int netId = 0; netId < static_cast<int>(nets.size()); ++netId) {
+        if (nets[netId].noroute || nets[netId].getPins().size() < 2) {
+            rawRoutes[netId] = {0};
+            nets[netId].setWires({});
+            nets[netId].setVias({});
+        }
+    }
+    const auto overflowStart = SteadyClock::now();
+    markOverflowNets(nets);
+    runStats.overflowMarkSeconds = elapsedSeconds(overflowStart);
+    runStats.routeHash64 = hashRawRoutes(rawRoutes);
+    runStats.wireMapHash64 = hashIntVector(wires);
+    runStats.viaMapHash64 = hashIntVector(vias);
+    runStats.totalSeconds = elapsedSeconds(totalStart);
+    runStats.terminalStatus = "completed";
 }
 
 void CPURouter::loadCanonicalRoutes(const std::vector<GrNet>& nets,
@@ -895,7 +1289,7 @@ torch::Tensor CPURouter::getFixUsageMap() { return buildGridTensor(fixUsage); }
 torch::Tensor CPURouter::getMovUsageMap() { return buildGridTensor(movUsage); }
 
 void CPURouter::unsupported(const std::string& operation) const {
-    throw std::runtime_error("backend=cpu_pr operation=" + operation + " is unsupported");
+    throw std::runtime_error("backend=" + diagnosticBackend + " operation=" + operation + " is unsupported");
 }
 
 }  // namespace gr

@@ -3,7 +3,7 @@
 
 namespace gr {
 
-enum class GGRBackend { CUDA, CPU_PR, CUGR2, AUTO };
+enum class GGRBackend { CUDA, CPU_PR, CPU_PR_MT, CUGR2, AUTO };
 
 GGRBackend parseGGRBackend(const std::string& value);
 std::string ggrBackendName(GGRBackend backend);
@@ -24,6 +24,10 @@ public:
 
     // 3. The number of Rip-up and Reroute iterations (if 0, only PR is invoked)
     int rrrIters = 0;
+
+    // Requested CPU pattern-routing workers.  The effective count is chosen
+    // by the selected backend after grid and scratch-budget validation.
+    int requestedWorkers = 1;
 
     GGRBackend backend = GGRBackend::AUTO;
     GGRBackend resolvedBackend = GGRBackend::AUTO;

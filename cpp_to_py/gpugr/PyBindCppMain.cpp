@@ -954,6 +954,13 @@ bool loadGRParams(const pybind11::dict& kwargs) {
         gr::grSetting.rrrIters = kwargs["rrrIters"].cast<int>();
     }
 
+    if (kwargs.contains("threads")) {
+        gr::grSetting.requestedWorkers = kwargs["threads"].cast<int>();
+    }
+    if (gr::grSetting.requestedWorkers <= 0) {
+        throw std::runtime_error("gpugr threads must be positive");
+    }
+
     if (kwargs.contains("route_guide")) {
         gr::grSetting.routeGuideFile = kwargs["route_guide"].cast<std::string>();
     }
@@ -965,6 +972,10 @@ bool loadGRParams(const pybind11::dict& kwargs) {
     if (gr::grSetting.backend == gr::GGRBackend::CPU_PR && gr::grSetting.rrrIters > 0) {
         throw std::runtime_error(
             "backend=cpu_pr operation=load_gr_params only supports rrr_iters=0; CPU RRR is unsupported");
+    }
+    if (gr::grSetting.backend == gr::GGRBackend::CPU_PR_MT && gr::grSetting.rrrIters > 0) {
+        throw std::runtime_error(
+            "backend=cpu_pr_mt operation=load_gr_params only supports rrr_iters=0; CPU RRR is unsupported");
     }
     if (gr::grSetting.backend == gr::GGRBackend::CUGR2 && gr::grSetting.rrrIters > 0) {
         throw std::runtime_error(
@@ -995,6 +1006,42 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     pybind11::class_<gr::RouteForce, std::shared_ptr<gr::RouteForce>>(m, "RouteForce")
         .def(pybind11::init<std::shared_ptr<gr::GRDatabase>>())
         .def("run_ggr", &gr::RouteForce::run_ggr)
+        .def("run_stats", [](const gr::RouteForce& routeforce) {
+            const auto stats = routeforce.getRunStats();
+            pybind11::dict result;
+            result["schema_version"] = stats.schemaVersion;
+            result["requested_workers"] = stats.requestedWorkers;
+            result["effective_workers"] = stats.effectiveWorkers;
+            result["batch_count"] = stats.batchCount;
+            result["parallel_batch_count"] = stats.parallelBatchCount;
+            result["conflict_batch_count"] = stats.conflictBatchCount;
+            result["serial_fallback_batch_count"] = stats.serialFallbackBatchCount;
+            result["max_batch_size"] = stats.maxBatchSize;
+            result["batch_size_limit"] = stats.batchSizeLimit;
+            result["batch_conflict_scan_limit"] = stats.batchConflictScanLimit;
+            result["candidate_batch_count"] = stats.candidateBatchCount;
+            result["candidate_batch_size_limit"] = stats.candidateBatchSizeLimit;
+            result["packed_conflict_batch_count"] = stats.packedConflictBatchCount;
+            result["scratch_bytes_per_worker"] = stats.scratchBytesPerWorker;
+            result["memory_budget_bytes"] = stats.memoryBudgetBytes;
+            result["route_hash64"] = stats.routeHash64;
+            result["wire_map_hash64"] = stats.wireMapHash64;
+            result["via_map_hash64"] = stats.viaMapHash64;
+            result["worker_clamp_reason"] = stats.workerClampReason;
+            result["terminal_status"] = stats.terminalStatus;
+            result["flute_parallel"] = stats.fluteParallel;
+            result["cost_map_seconds"] = stats.costMapSeconds;
+            result["batch_schedule_seconds"] = stats.batchScheduleSeconds;
+            result["prepare_seconds"] = stats.prepareSeconds;
+            result["flute_wait_seconds"] = stats.fluteWaitSeconds;
+            result["flute_wall_seconds"] = stats.fluteWallSeconds;
+            result["candidate_seconds"] = stats.candidateSeconds;
+            result["commit_seconds"] = stats.commitSeconds;
+            result["serial_fallback_seconds"] = stats.serialFallbackSeconds;
+            result["overflow_mark_seconds"] = stats.overflowMarkSeconds;
+            result["total_seconds"] = stats.totalSeconds;
+            return result;
+        })
         .def("num_ovfl_nets", &gr::RouteForce::getNumOvflNets)
         .def("gcell_steps", &gr::RouteForce::getGcellStep)
         .def("microns", &gr::RouteForce::getMicrons)

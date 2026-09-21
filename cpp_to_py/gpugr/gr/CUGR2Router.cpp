@@ -125,7 +125,7 @@ void CUGR2Router::installFluteProvider() {
 }
 
 void CUGR2Router::initialize(const GRDatabase& grdb) {
-    accumulator_.initialize(grdb);
+    accumulator_.initialize(grdb, "cugr2");
     accumulator_.setMap(
         grdb.capacity,
         grdb.wireDist,

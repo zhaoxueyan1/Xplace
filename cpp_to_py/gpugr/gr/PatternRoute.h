@@ -18,7 +18,9 @@ int prepare(double &count,
             int Y,
             int N,
             int LAYER,
-            int DIRECTION);
+            int DIRECTION,
+            double *fluteWaitSeconds = nullptr,
+            double *fluteWallSeconds = nullptr);
 
 void prepareSingeNet(gr::GrNet &grNet, int routesOffset, int X, int Y, int N, int LAYER, int DIRECTION);
 

@@ -3,15 +3,19 @@
 #include "common/common.h"
 #include "gpugr/db/GRDatabase.h"
 #include "gpugr/db/GrNet.h"
+#include "gpugr/gr/CpuRouteBatchScheduler.h"
+#include "gpugr/gr/CpuRouteTypes.h"
 #include <torch/extension.h>
 #include <tuple>
 #include <vector>
 
 namespace gr {
 
+class CpuRouteWorkerPool;
+
 class CPURouter {
 public:
-    void initialize(const gr::GRDatabase& grdb);
+    void initialize(const gr::GRDatabase& grdb, const std::string& backendName = "cpu_pr");
     void setMap(const std::vector<float>& cap,
                 const std::vector<float>& wir,
                 const std::vector<float>& fixedL,
@@ -19,6 +23,7 @@ public:
                 const std::vector<float>& fixRaw,
                 const std::vector<float>& movRaw);
     void route(std::vector<GrNet>& nets);
+    void routeParallel(std::vector<GrNet>& nets, int requestedWorkers);
     void loadCanonicalRoutes(const std::vector<GrNet>& nets,
                              const std::vector<std::vector<int>>& canonicalRawRoutes);
 
@@ -29,6 +34,7 @@ public:
     torch::Tensor getMovUsageMap();
     int getNumOvflNets() const { return numOvflNets; }
     std::vector<std::vector<int>> getRawRoutes() const { return rawRoutes; }
+    const CpuRouteRunStats& getRunStats() const { return runStats; }
 
 private:
     int encodedIndex(int layer, int x, int y) const;
@@ -42,15 +48,28 @@ private:
     int calcViaCost(int encoded) const;
     void calculateCostMaps();
     void calculateCostSum();
-    void routePreparedNet(const std::vector<int>& points, std::vector<int>& rawRoute);
+    void calculateCostMapsParallel(CpuRouteWorkerPool& workerPool, int workers);
+    void calculateCostSumParallel(CpuRouteWorkerPool& workerPool);
+    void routePreparedNet(const std::vector<int>& points,
+                          CpuRouteScratch& scratch,
+                          CpuRouteCandidate& candidate,
+                          bool resetOnlyRouteRegion) const;
     void viaSweep(std::vector<int64_t>& map,
                   std::vector<int>& prev,
                   std::vector<int>& midScratch,
                   int x,
                   int y) const;
-    void appendWire(std::vector<int>& rawRoute, int from, int to);
-    void appendVia(std::vector<int>& rawRoute, int encoded);
-    std::vector<int> buildRoutingOrder(const std::vector<GrNet>& nets, std::vector<int>& batchSizes) const;
+    void appendWire(CpuRouteCandidate& candidate, int from, int to) const;
+    void appendVia(CpuRouteCandidate& candidate, int encoded) const;
+    CpuRouteBatchSchedule buildRoutingOrder(const std::vector<GrNet>& nets,
+                                            int conflictScanLimit,
+                                            int batchSizeLimit,
+                                            bool packConflictTail) const;
+    void commitCandidate(GrNet& net, const CpuRouteCandidate& candidate);
+    bool batchHasResourceConflict(const std::vector<GrNet>& nets,
+                                  const std::vector<CpuRouteCandidate>& candidates,
+                                  std::size_t begin,
+                                  std::size_t end) const;
     void setNetRouteFromRaw(GrNet& net, const std::vector<int>& rawRoute) const;
     void markOverflowNets(const std::vector<GrNet>& nets);
     float twoCellsViaUsage(int encoded) const;
@@ -87,6 +106,8 @@ private:
     float logisticSlope = 1.0f;
     int numOvflNets = 0;
     std::vector<std::vector<int>> rawRoutes;
+    CpuRouteRunStats runStats;
+    std::string diagnosticBackend = "cpu_pr";
 };
 
 }  // namespace gr
