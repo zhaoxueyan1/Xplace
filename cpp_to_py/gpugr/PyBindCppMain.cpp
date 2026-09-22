@@ -565,6 +565,29 @@ struct PinAccessGrid {
     int y = 0;
 };
 
+int gridIndexFromDbu(const std::vector<int>& lines, float p) {
+    const int ip = static_cast<int>(p);
+    int idx = static_cast<int>(std::lower_bound(lines.begin(), lines.end(), ip) - lines.begin()) - 1;
+    return std::max(0, std::min(idx, static_cast<int>(lines.size()) - 2));
+}
+
+// Pins skipped by GR setup (no access points on the enabled layers) never
+// enter accessByGpdbPin. Approximate their access with the gcell containing
+// the pin's absolute position so the net keeps its L-shape topology edges.
+PinAccessGrid pinAccessOrPinGrid(const gr::GRDatabase& grdb,
+                                 const std::unordered_map<int, PinAccessGrid>& accessByGpdbPin,
+                                 int gpdbPinId,
+                                 const gp::point_type& pinPos,
+                                 int& fallbackCount) {
+    auto it = accessByGpdbPin.find(gpdbPinId);
+    if (it != accessByGpdbPin.end()) {
+        return it->second;
+    }
+    ++fallbackCount;
+    return PinAccessGrid{gridIndexFromDbu(grdb.gridlines[0], pinPos.first),
+                         gridIndexFromDbu(grdb.gridlines[1], pinPos.second)};
+}
+
 struct LShapeEdgeRecord {
     int from = -1;
     int to = -1;
@@ -816,18 +839,14 @@ pybind11::dict buildLShapeTopologyPack(gr::RouteForce& routeforce,
         for (size_t i = 1; i < mappedGlobalPins.size(); ++i) {
             const int gpdbA = mappedGpdbPins[i - 1];
             const int gpdbB = mappedGpdbPins[i];
-            auto accessItA = accessByGpdbPin.find(gpdbA);
-            auto accessItB = accessByGpdbPin.find(gpdbB);
-            if (accessItA == accessByGpdbPin.end() || accessItB == accessByGpdbPin.end()) {
-                ++unmappedPinCount;
-                throw std::runtime_error("GGR L-shape topology pack cannot map pin access gcell");
-            }
+            const gp::point_type pinPosA = grdb.gpdb.getAbsolutePinPos(gpPins[gpdbA]);
+            const gp::point_type pinPosB = grdb.gpdb.getAbsolutePinPos(gpPins[gpdbB]);
+            const PinAccessGrid accessA =
+                pinAccessOrPinGrid(grdb, accessByGpdbPin, gpdbA, pinPosA, unmappedPinCount);
+            const PinAccessGrid accessB =
+                pinAccessOrPinGrid(grdb, accessByGpdbPin, gpdbB, pinPosB, unmappedPinCount);
             const int direction = chooseLShapeDirection(
-                routeRecord,
-                grdb.gpdb.getAbsolutePinPos(gpPins[gpdbA]),
-                grdb.gpdb.getAbsolutePinPos(gpPins[gpdbB]),
-                accessItA->second,
-                accessItB->second);
+                routeRecord, pinPosA, pinPosB, accessA, accessB);
             edgeRecords.push_back({
                 mappedGlobalPins[i - 1],
                 mappedGlobalPins[i],
