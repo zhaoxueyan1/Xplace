@@ -5,6 +5,15 @@ namespace gr {
 
 class GrNet {
 public:
+    // Preserve the actual setup choice; timing export must not reconstruct
+    // access from the nearest grid cell or hide routing-layer clamping.
+    struct PinAccess {
+        int gpdbPinId;
+        int layer, x, y;
+        int physicalLayer;
+        int lx, ly, hx, hy;
+    };
+    std::vector<PinAccess> pinAccess;
     void setPins(const std::vector<std::vector<int>>& p) { pins = p; }
     void setBoundingBox(int lx, int ly, int ux, int uy) {
         lowerx = lx;

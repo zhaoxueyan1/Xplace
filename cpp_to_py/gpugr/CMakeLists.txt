@@ -26,7 +26,7 @@ endif()
 target_compile_definitions(ggr PRIVATE
                             ENABLE_CUDA=${TORCH_ENABLE_CUDA})
 
-pybind11_add_module(gpugr MODULE PyBindCppMain.cpp)
+pybind11_add_module(gpugr MODULE PyBindCppMain.cpp TimingRouteExport.cpp)
 
 target_include_directories(gpugr PRIVATE ${TORCH_INCLUDE_DIRS} ${PROJECT_SOURCE_DIR}/cpp_to_py ${FLUTE_INCLUDE_DIR})
 target_link_libraries(gpugr PRIVATE torch ${TORCH_PYTHON_LIBRARY} xplace_common flute io_parser ggr)

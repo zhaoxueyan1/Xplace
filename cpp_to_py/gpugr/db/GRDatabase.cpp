@@ -839,6 +839,8 @@ void GRDatabase::setupGrNets() {
         for (int netId = threadIdx; netId < rawdb.nets.size(); netId += db::setting.numThreads) {
             db::Net* rawdbNet = rawdb.nets[netId];
             std::vector<std::vector<std::tuple<int, int, int>>> pinAccessPoints(rawdbNet->pins.size());
+            std::vector<std::vector<RectOnLayer>> pinAccessShapes(rawdbNet->pins.size());
+            grNets[netId].pinAccess.clear();
             for (size_t pinIdx = 0; pinIdx < rawdbNet->pins.size(); pinIdx++) {
                 std::vector<RectOnLayer> pin_shapes;
                 db::Pin* net_pin = rawdbNet->pins[pinIdx];
@@ -941,6 +943,7 @@ void GRDatabase::setupGrNets() {
                             if (vis.find(t) != vis.end()) continue;
                             vis.insert(t);
                             pinAccessPoints[pinIdx].emplace_back(t);
+                            pinAccessShapes[pinIdx].push_back(e);
                         }
                     }
                 }
@@ -998,6 +1001,10 @@ void GRDatabase::setupGrNets() {
                     }
                 }
                 const auto [selected_l, selected_x, selected_y] = accessPoints[bestIndex];
+                const auto& shape = pinAccessShapes[pinIdx][bestIndex];
+                grNets[netId].pinAccess.push_back({net_pin->gpdb_id,
+                                                 selected_l, selected_x, selected_y,
+                                                 shape.layer, shape.lx, shape.ly, shape.hx, shape.hy});
                 const utils::PointT<int> selectedPoint(selected_x, selected_y);
                 const uint64_t hash = selectedPoint.x * ySize + selectedPoint.y;
                 if (selectedAccessPoints.find(hash) == selectedAccessPoints.end()) {

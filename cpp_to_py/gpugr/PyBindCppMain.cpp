@@ -6,6 +6,7 @@
 #include "gpugr/db/GRDatabase.h"
 #include "gpugr/gr/RouteForce.h"
 #include "flute.h"
+#include "TimingRouteExport.h"
 #include <pybind11/numpy.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
@@ -1066,6 +1067,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def("routing_layer_names", &gr::RouteForce::getRoutingLayerNames)
         .def("raw_routes", &gr::RouteForce::getRawRoutes, py::return_value_policy::move)
         .def("route_entries", [](gr::RouteForce& routeforce) { return buildRouteEntries(routeforce); })
+        .def("timing_route_pack", &exportTimingRoutes)
         .def(
             "same_net_topology_pack",
             [](gr::RouteForce& routeforce,

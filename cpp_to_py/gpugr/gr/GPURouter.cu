@@ -296,7 +296,9 @@ __global__ void calculateCoarseVia(float *cell_resource,
 __global__ void initMap(dtype *dist, int *prev, int total, int N) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if(idx < N) {
-        dist[idx] = INF;
+        // Match maze routing's distance sentinel. Congested fine-grid paths
+        // can cost more than the 1e7 used as an individual blocked-edge cost.
+        dist[idx] = 1000000000;
         prev[idx] = idx % total;
         //for(int i = 0; i < N; i++)
         //    dist[idx + i * total] = INF, prev[idx + i * total] = idx;
@@ -530,7 +532,7 @@ __global__ void commit(int *routes,
     for(int64_t i = 1; i < routeLength; i += 2) if(routes[i + 1] > 0) {
         for(int j = 0; j < routes[i + 1]; j++)
             atomicAdd(wires + routes[i] + j, 1);
-    } else
+    } else if (routes[i + 1] == -1)
         atomicAdd(vias + routes[i], 1);
 }
 
@@ -548,7 +550,7 @@ __global__ void ripupOverflowNets(int *isOverflowNet,
     for(int64_t i = 1; i < routeLength; i += 2) if(routes[i + 1] > 0) {
         for(int j = 0; j < routes[i + 1]; j++)
             atomicAdd(wires + routes[i] + j, -1);
-    } else
+    } else if (routes[i + 1] == -1)
         atomicAdd(vias + routes[i], -1);
     routes[0] = 1;
     routeLengths[idx] = 1;
@@ -1202,7 +1204,7 @@ void GPURouter::route(std::vector<GrNet> &nets, int iter) {
                 const int netId = batchNetIds[i];
                 if (routeLengths[netId] < 0) {
                     throw std::runtime_error(
-                        "GPU maze-routing route buffer capacity exceeded for net " +
+                        "GPU maze-routing path construction failed or route buffer capacity exceeded for net " +
                         std::to_string(netId));
                 }
             }

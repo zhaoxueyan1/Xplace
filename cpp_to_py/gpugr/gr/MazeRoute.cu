@@ -2,6 +2,7 @@
 #include <climits>
 
 #include "MazeRoute.h"
+#include "MazeRouteRecords.cuh"
 
 #include <stdexcept>
 #include <string>
@@ -606,23 +607,6 @@ __device__ void inline cudaSwap(T &a, T &b) {
     b = c;
 }
 
-__device__ __forceinline__ bool appendMazeRoute(int *routes,
-                                                int64_t *routeLength,
-                                                int64_t routeCapacity,
-                                                int *routeOverflow,
-                                                int value) {
-    const int64_t cursor = *routeLength;
-    if (cursor < 1 || cursor >= routeCapacity || cursor >= static_cast<int64_t>(INT_MAX)) {
-        *routeLength = -1;
-        routes[0] = -1;
-        if (routeOverflow != nullptr) *routeOverflow = 1;
-        return false;
-    }
-    routes[cursor] = value;
-    *routeLength = cursor + 1;
-    routes[0] = static_cast<int>(*routeLength);
-    return true;
-}
 __global__ void routeFG(int64_t *costSum,
                         int *pins,
                         int *mark,
@@ -866,9 +850,19 @@ __global__ void routeFG(int64_t *costSum,
     __syncthreads();
     if (threadIdx.x == 0) {
         routes += pins[-1];
+        if (*routeLength == 1) {
+            appendMazePinVias(routes, routeLength, routeCapacity, routeOverflow,
+                              pins + 2, pins[1], vias);
+        }
         int p = mark[1];
         while (dist[p] > 0) {
             int pp = prev[p];
+            if (pp == p) {
+                printf("Fine-grid path finding failed: point=%d distance=%d route_offset=%d\n", p, dist[p], pins[-1]);
+                *routeLength = -1;
+                routes[0] = -1;
+                break;
+            }
             prev[p] = p;
             dist[p] = 0;
             int minp = min(p, pp), maxp = max(p, pp);
@@ -893,8 +887,8 @@ __global__ void routeFG(int64_t *costSum,
                 // else if(routes[0] >= 3 && routes[routes[0] - 1] != -1 && routes[routes[0] - 2] - 1 == min(p, pp))
                 //     routes[routes[0] - 2]--, routes[routes[0] - 1]++;
                 // else
-                if (appendMazeRoute(routes, routeLength, routeCapacity, routeOverflow, min(p, pp)) &&
-                    appendMazeRoute(routes, routeLength, routeCapacity, routeOverflow, maxp - minp))
+                if (appendMazeWire(routes, routeLength, routeCapacity, routeOverflow,
+                                   minp, maxp - minp, N))
                     for (int i = min(p, pp); i < max(p, pp); i++) atomicAdd(wires + i, 1);
             }
             p = pp;
@@ -902,6 +896,8 @@ __global__ void routeFG(int64_t *costSum,
         // for(int i = 1; i < routes[0]; i += 2)
         //     printf("(%d %d %d) >> ", routes[i] / N / N, routes[i] / N % N, routes[i] % N);
         // printf(" END\n");
+        appendMazePinVias(routes, routeLength, routeCapacity, routeOverflow,
+                          pins + mark[2], mark[3] - mark[2] + 1, vias);
         for (int i = mark[2]; i <= mark[3]; i++) dist[pins[i]] = 0, prev[pins[i]] = pins[i];
     }
     __syncthreads();
