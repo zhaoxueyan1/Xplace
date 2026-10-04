@@ -1,4 +1,5 @@
 #pragma once
+#include "NetRoutingPolicy.h"
 #include <vector>
 #include <unordered_map>
 namespace gr {
@@ -14,6 +15,7 @@ public:
         int lx, ly, hx, hy;
     };
     std::vector<PinAccess> pinAccess;
+    NetExclusion exclusion = NetExclusion::None;
     void setPins(const std::vector<std::vector<int>>& p) { pins = p; }
     void setBoundingBox(int lx, int ly, int ux, int uy) {
         lowerx = lx;

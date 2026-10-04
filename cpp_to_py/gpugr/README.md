@@ -18,6 +18,21 @@ Shiju Lin and Martin D. F. Wong. "[Superfast Full-Scale GPU-Accelerated Global R
 ## Parameters
 Please refer to `cpp_to_py/gpugr/PyBindCppMain.cpp`.
 
+- All backends exclude DEF `USE CLOCK` nets and nets with electrical fanout
+  greater than 100 before constructing pin access groups. Fanout counts
+  non-output pins in the parser's electrical direction domain; fanout 100
+  remains eligible. Excluded nets contribute no routed wire/via demand.
+- `clock_net_names`: Explicit STA clock identities, in addition to DEF clock
+  types. Names are matched exactly; names containing `clk` are not inferred
+  to be clocks. This setting resets on every `load_gr_params` call.
+- `timing_route_pack()` preserves excluded net/pin IDs with `net_status=4`,
+  empty geometry and `pin_vertex=-1`. `net_exclusion_reason` is 0 for ordinary
+  nets, 1 for clocks, and 2 for high fanout (clock takes precedence). It also
+  reports `net_fanout`, both exclusion counts, and `max_gr_fanout`.
+- CUDA `route_grad` gives excluded or unconnected placement pins zero force.
+  An entirely excluded design returns zero node gradients without launching
+  an empty global-pin kernel. `tests/gpugr/net_exclusion.py --backend cuda
+  --rrr 0` checks this interface as well as unchanged ordinary-net gradients.
 - `device_id`: GPU id.
 - `route_xSize` / `route_ySize`: Given GR GridGraph size. If the given size is `0`, use the `GRIDGRAPH` definition in DEF file. If the given size is `0` and there is no definition in DEF, we set it as `512`.
 - `rrrIters`: The number of rip-up and re-route iterations (maze route). If `rrrIters = 0`, perform the pattern route only.

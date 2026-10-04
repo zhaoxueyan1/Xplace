@@ -1,5 +1,6 @@
 #pragma once
 #include <string>
+#include <unordered_set>
 
 namespace gr {
 
@@ -33,6 +34,8 @@ public:
     GGRBackend resolvedBackend = GGRBackend::AUTO;
 
     std::string routeGuideFile = "";
+    // Explicit STA clock identities supplement DEF USE CLOCK.
+    std::unordered_set<std::string> clockNetNames;
 
     void reset();
 };

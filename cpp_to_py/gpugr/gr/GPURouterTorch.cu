@@ -173,6 +173,8 @@ __global__ void assignRouteForceToPlPin(
     int plPinId = blockIdx.x * blockDim.x + threadIdx.x;
     if (plPinId < numPlPin) {
         int gbPinId = plPinId2gbPinId[plPinId];
+        // Excluded or unconnected pins retain the caller's zero force.
+        if (gbPinId < 0) return;
         plpin_grad[plPinId][0] = gbpin_grad[gbPinId][0];
         plpin_grad[plPinId][1] = gbpin_grad[gbPinId][1];
     }
@@ -449,6 +451,10 @@ torch::Tensor GPURouter::calcRouteGrad(torch::Tensor mask_map,
     // 1. compute demand map and capacity map
     // 2. compute route_gradmat for each gcell (use torchDCT)
 
+    auto node_grad = torch::zeros({num_nodes, 2},
+                        torch::dtype(torch::kFloat32).device(torch::Device(torch::kCUDA, DEVICE_ID)));
+    if (numGbPin == 0) return node_grad;
+
     // 3. compute route force for each global pin
     torch::Tensor gbpin_grad = torch::zeros({numGbPin, 2}, 
                         torch::dtype(torch::kFloat32).device(torch::Device(torch::kCUDA, DEVICE_ID)));
@@ -476,7 +482,6 @@ torch::Tensor GPURouter::calcRouteGrad(torch::Tensor mask_map,
     );
 
     // 5. calc node grad (use deterministic summation)
-    auto node_grad = torch::zeros({num_nodes, 2}, torch::dtype(plpin_grad.dtype()).device(plpin_grad.device()));
     const int threads = 128;
     const int blocks = (num_nodes * 2 + threads - 1) / threads;
     calc_node_grad_deterministic_cuda_kernel<<<blocks, threads, 0>>>(

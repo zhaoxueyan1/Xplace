@@ -56,6 +56,7 @@ void GRSetting::reset() {
     resolvedBackend = GGRBackend::AUTO;
 
     routeGuideFile = ""; 
+    clockNetNames.clear();
 }
 
 GRSetting grSetting;

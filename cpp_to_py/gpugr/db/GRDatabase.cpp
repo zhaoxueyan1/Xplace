@@ -838,6 +838,14 @@ void GRDatabase::setupGrNets() {
     auto thread_func = [&](int threadIdx) {
         for (int netId = threadIdx; netId < rawdb.nets.size(); netId += db::setting.numThreads) {
             db::Net* rawdbNet = rawdb.nets[netId];
+            auto& net = grNets[netId];
+            net.exclusion = routingExclusion(*rawdbNet);
+            if (net.exclusion != NetExclusion::None) {
+                net.setPins({});
+                net.setBoundingBox(0, 0, 0, 0);
+                net.setNoRoute();
+                continue;
+            }
             std::vector<std::vector<std::tuple<int, int, int>>> pinAccessPoints(rawdbNet->pins.size());
             std::vector<std::vector<RectOnLayer>> pinAccessShapes(rawdbNet->pins.size());
             grNets[netId].pinAccess.clear();
@@ -1092,13 +1100,18 @@ void GRDatabase::setupGrNets() {
     }
 
     int gbpidId = 0;
+    int clockCount = 0, highFanoutCount = 0;
     for (int netId = 0; netId < grNets.size(); netId++) {
+        clockCount += grNets[netId].exclusion == NetExclusion::Clock;
+        highFanoutCount += grNets[netId].exclusion == NetExclusion::HighFanout;
         for (auto e : grNets[netId].getPins()) {
             grNets[netId].pin2gbpinId.emplace_back(gbpidId++);
         }
     }
 
     logger.info("INCORRECT noroute nets: %d %d", tempcnt, tempcnt2);
+    logger.info("GR excluded nets: clock=%d high_fanout=%d (fanout > %d)",
+                clockCount, highFanoutCount, MAX_GR_FANOUT);
 }
 
 void GRDatabase::resetGrNetsRoute() {

@@ -64,19 +64,26 @@ py::dict exportTimingRoutes(gr::RouteForce& routeforce) {
     std::vector<int> pinX(pins.size(), 0), pinY(pins.size(), 0);
     std::vector<int> pinShape(pins.size() * 4, 0), pinDriver(pins.size(), 0);
     std::vector<int> pinLocalPathMissing(pins.size(), 1), netStatus;
+    std::vector<int> netExclusion, fanout;
     std::vector<std::string> netNames, pinNames;
     for (const auto& pin : pins) pinNames.push_back(pin.getName());
     int duplicateEdges = 0;
     int missingLocalPaths = 0;
     int clampedLayers = 0;
+    int clockCount = 0, highFanoutCount = 0;
 
     for (std::size_t netId = 0; netId < routes.size(); ++netId) {
         const auto& net = db.grNets[netId];
         const auto* rawNet = db.rawdb.nets[netId];
         netNames.push_back(rawNet->name);
         const auto& raw = routes[netId];
-        // 0=routed, 1=coincident/single group, 2=failed, 3=unrouted.
-        netStatus.push_back(raw.empty() || raw[0] < 0 ? 2 : net.noroute ? 1 : raw[0] == 0 ? 3 : 0);
+        // 0=routed, 1=coincident/single group, 2=failed, 3=unrouted, 4=excluded.
+        netStatus.push_back(net.exclusion != gr::NetExclusion::None ? 4 :
+                            raw.empty() || raw[0] < 0 ? 2 : net.noroute ? 1 : raw[0] == 0 ? 3 : 0);
+        netExclusion.push_back(static_cast<int>(net.exclusion));
+        fanout.push_back(gr::netFanout(*rawNet));
+        clockCount += net.exclusion == gr::NetExclusion::Clock;
+        highFanoutCount += net.exclusion == gr::NetExclusion::HighFanout;
         std::map<Point, int> vertices;
         std::set<std::pair<int, int>> edges;
         auto vertex = [&](Point point) {
@@ -175,6 +182,11 @@ py::dict exportTimingRoutes(gr::RouteForce& routeforce) {
     result["net_vertex_start"] = array(netVertexStart);
     result["net_edge_start"] = array(netEdgeStart);
     result["net_status"] = array(netStatus);
+    result["net_exclusion_reason"] = array(netExclusion);
+    result["net_fanout"] = array(fanout);
+    result["excluded_clock_net_count"] = clockCount;
+    result["excluded_high_fanout_net_count"] = highFanoutCount;
+    result["max_gr_fanout"] = gr::MAX_GR_FANOUT;
     result["pin_vertex"] = array(pinVertex);
     result["pin_net"] = array(pinNet);
     result["pin_is_driver"] = array(pinDriver);

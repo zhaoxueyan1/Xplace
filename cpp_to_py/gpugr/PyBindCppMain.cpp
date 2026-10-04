@@ -944,6 +944,10 @@ pybind11::dict buildLShapeTopologyPack(gr::RouteForce& routeforce,
 
 bool loadGRParams(const pybind11::dict& kwargs) {
     gr::grSetting.reset();
+    if (kwargs.contains("clock_net_names")) {
+        const auto names = kwargs["clock_net_names"].cast<std::vector<std::string>>();
+        gr::grSetting.clockNetNames.insert(names.begin(), names.end());
+    }
     // ----- design related options -----
 
     if (kwargs.contains("device_id")) {

@@ -1249,7 +1249,8 @@ void GPURouter::setFromNets(std::vector<GrNet> &nets, int numPlPin_) {
     for(int i = 0; i < NET_NUM; i++) {
         pinNumCPU[i] = nets[i].getPins().size();
         routesOffsetCPU[i + 1] =
-            static_cast<int64_t>(pinNumCPU[i]) * MAX_ROUTE_LEN_PER_PIN + routesOffsetCPU[i];
+            std::max<int64_t>(1, static_cast<int64_t>(pinNumCPU[i]) * MAX_ROUTE_LEN_PER_PIN) +
+            routesOffsetCPU[i];
     }
     const int64_t totalRouteInts = routesOffsetCPU[NET_NUM];
     if (totalRouteInts <= 0) {
@@ -1269,6 +1270,7 @@ void GPURouter::setFromNets(std::vector<GrNet> &nets, int numPlPin_) {
     cudaMalloc(&routesOffset, (NET_NUM + 1) * sizeof(int64_t));
     cudaMemcpy(routesOffset, routesOffsetCPU, sizeof(int64_t) * (NET_NUM + 1), cudaMemcpyHostToDevice);
 
+    numGbPin = 0;
     for (int netId = nets.size() - 1; netId >= 0; netId--) {
         auto& lastGrNet = nets[netId];
         if (lastGrNet.pin2gbpinId.size() > 0) {
