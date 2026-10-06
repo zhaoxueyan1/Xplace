@@ -34,7 +34,8 @@ public:
                     int netId,
                     int *batchNetIds,
                     int64_t *routeLengths,
-                    const int64_t *routeOffsets);
+                    const int64_t *routeOffsets,
+                    int *routeOverflows);
 
     const static int MAX_TOT_PIN_NUM = 1000000, MAX_NUM_NET = 100;
 

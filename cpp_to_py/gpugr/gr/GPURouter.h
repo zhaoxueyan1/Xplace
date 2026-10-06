@@ -3,6 +3,7 @@
 #include "PatternRoute.h"
 #include "common/common.h"
 #include "gpugr/gr/BatchOccupancy.h"
+#include "gpugr/gr/RouteBufferCapacity.h"
 #include <cstdint>
 #include <torch/extension.h>
 #include "gpugr/db/GrNet.h"
@@ -58,6 +59,7 @@ public:
                 const std::vector<float> &fixedL,
                 const std::vector<float> &fix);
     void setFromNets(std::vector<GrNet> &nets, int numPlPin_);
+    void growRouteBuffer(const std::vector<int>& netIds);
     void setToNets(std::vector<GrNet> &nets);
     void route(std::vector<GrNet> &nets, int iterleft);
     void setUnitViaMultiplier(float w);

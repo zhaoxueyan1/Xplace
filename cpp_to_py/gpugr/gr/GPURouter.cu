@@ -719,6 +719,7 @@ void GPURouter::route(std::vector<GrNet> &nets, int iter) {
     double prtime = 0, prpreparetime = 0, batchgentime = 0, timer2 = 0;
 
     std::vector<int> netsToRoute;
+    std::vector<int> overflowNets;
     if(iter > 0) {
         logger.info("Maze Routing...");
         ripupOverflowNets<<<BLOCK_NUMBER(NET_NUM), BLOCK_SIZE>>>(
@@ -1159,6 +1160,7 @@ void GPURouter::route(std::vector<GrNet> &nets, int iter) {
             for(int i = 0; i < batchSize; i++) {
                 int netId = netsToRoute[startpos + i], cur = 0, *pins = allpins + i * MAX_PIN_SIZE_PER_NET;
                 batchNetIds[i] = netId;
+                batchRouteOverflows[i] = 0;
                 auto& vec = nets[netId].getPins();
                 pins[cur++] = routesOffsetCPU[netId];
                 pins[cur++] = vec.size();
@@ -1198,13 +1200,17 @@ void GPURouter::route(std::vector<GrNet> &nets, int iter) {
                              netsToRoute[startpos],
                              batchNetIds,
                              routeLengths,
-                             routesOffsetCPU);
+                             routesOffsetCPU,
+                             batchRouteOverflows);
             cudaDeviceSynchronize();
             for (int i = 0; i < batchSize; ++i) {
+                if (batchRouteOverflows[i]) overflowNets.push_back(batchNetIds[i]);
+            }
+            for (int i = 0; i < batchSize; ++i) {
                 const int netId = batchNetIds[i];
-                if (routeLengths[netId] < 0) {
+                if (routeLengths[netId] < 0 && !batchRouteOverflows[i]) {
                     throw std::runtime_error(
-                        "GPU maze-routing path construction failed or route buffer capacity exceeded for net " +
+                        "GPU maze-routing path construction failed for net " +
                         std::to_string(netId));
                 }
             }
@@ -1213,6 +1219,9 @@ void GPURouter::route(std::vector<GrNet> &nets, int iter) {
         //std::cerr << "pins: " << sumofpins << ' ' << 1.0 * sumofpins / netsToRoute.size() << std::endl;
         startpos += batchSize;
     }
+    // Collect all capacity failures before restarting. Their partial demand is
+    // discarded; never inspect or export the incomplete route records.
+    if (!overflowNets.empty()) throw RouteCapacityExceeded(std::move(overflowNets));
     if(!iter) {
         logger.info("INFO: PR Prepare Time %.4f", prpreparetime / CLOCKS_PER_SEC);
         logger.info("INFO: PR Kernel Time %.4f", prtime / CLOCKS_PER_SEC);

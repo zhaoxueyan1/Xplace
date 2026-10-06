@@ -135,24 +135,32 @@ void RouteForce::run_ggr() {
         _unitShortVioCost[i] =
             _unitShortVioCostRaw * grdb.layerWidth[i] * grdb.microns / grdb.m2pitch / grdb.m2pitch / _unitWireCostRaw;
     }
-    double tot_time = 0;
-    for (int iter = 0; iter < rrrIterLimit; iter++) {
-        router.setLogisticSlope(1 << iter);
-        router.setUnitVioCost(_unitShortVioCost, 0.1);
-        if (iter == 0) {
-            router.setUnitViaMultiplier(1);
-        } else {
-            router.setUnitViaMultiplier(std::max(100 / pow(5, iter - 1), 4.0));
-            router.setUnitVioCost(_unitShortVioCost,
-                                  rrrInitVioCostDiscount + (1.0 - rrrInitVioCostDiscount) / (rrrIterLimit - 1) * iter);
+    utils::timer routingTimer;
+    routingTimer.start();
+    for (;;) {
+        try {
+            for (int iter = 0; iter < rrrIterLimit; iter++) {
+                router.setLogisticSlope(1 << iter);
+                router.setUnitVioCost(_unitShortVioCost, 0.1);
+                if (iter == 0) {
+                    router.setUnitViaMultiplier(1);
+                } else {
+                    router.setUnitViaMultiplier(std::max(100 / pow(5, iter - 1), 4.0));
+                    router.setUnitVioCost(_unitShortVioCost,
+                                          rrrInitVioCostDiscount + (1.0 - rrrInitVioCostDiscount) / (rrrIterLimit - 1) * iter);
+                }
+                utils::timer T;
+                T.start();
+                router.route(grdb.grNets, iter);
+                logger.info("##### GPU Routing Iter: %d Time: %.4f #####", iter, T.elapsed());
+                // break;
+            }
+            break;
+        } catch (const RouteCapacityExceeded& overflow) {
+            router.growRouteBuffer(overflow.netIds);
         }
-        utils::timer T;
-        T.start();
-        router.route(grdb.grNets, iter);
-        tot_time += T.elapsed();
-        logger.info("##### GPU Routing Iter: %d Time: %.4f #####", iter, T.elapsed());
-        // break;
     }
+    const double tot_time = routingTimer.elapsed();
     router.setToNets(grdb.grNets);
     logger.info("Total GPU Routing time: %.4f", tot_time);
 

@@ -954,7 +954,8 @@ void GPUMazeRouter::getResults(double &time_cnt,
                                int netId,
                                int *batchNetIds,
                                int64_t *routeLengths,
-                               const int64_t *routeOffsets) {
+                               const int64_t *routeOffsets,
+                               int *routeOverflows) {
     DDEBUG = netId;
     /*printf("Pin Number: %d\n", pins[1]);
     printf("Coarse-Grained:\n");
@@ -1020,7 +1021,7 @@ void GPUMazeRouter::getResults(double &time_cnt,
                             sweepud[iter * MAX_TURN_NUM + turn] = flow[i * LOG + d].kernel(blockUD, (X + 1) / 2, 4 * X * sizeof(int), sweepUD, costL, costR, map + i * LAYER * X * Y, prev + i * LAYER * X * Y, 1 + (DIRECTION == 0), X, Y).succeed(minall[iter * MAX_TURN_NUM + turn]);
                         }        
                         path[iter] = flow[i * LOG + d].kernel(1, 1, 0, Path, map + i * LAYER * X * Y, pins + i * MAX_PIN_SIZE_PER_NET + 1, routedPin + i * routedPinStride, prev + i * LAYER * X * Y, mark + i * markStride, LAYER, X, Y, N, DIRECTION, SCALE).name("path" + std::to_string(d)).succeed(sweeplr[(iter + 1) * MAX_TURN_NUM - 1]).succeed(sweepud[(iter + 1) * MAX_TURN_NUM - 1]);
-                        fgroute[iter] = flow[i * LOG + d].kernel(1, SCALE * SCALE, 4 * LAYER * SCALE * SCALE * sizeof(int), routeFG, costSum, pins + i * MAX_PIN_SIZE_PER_NET + 1, mark + i * markStride, dist + i * LAYER * N * N, fgprev + i * LAYER * N * N, wireCost, viaCost, wires, vias, routes, LAYER, SCALE, X, Y, N, DIRECTION, routingLayerBegin, routingLayerEnd, routeLengths + batchNetIds[i], routeOffsets[batchNetIds[i] + 1] - routeOffsets[batchNetIds[i]], nullptr).name("fgroute" + std::to_string(d)).succeed(path[iter]);
+                        fgroute[iter] = flow[i * LOG + d].kernel(1, SCALE * SCALE, 4 * LAYER * SCALE * SCALE * sizeof(int), routeFG, costSum, pins + i * MAX_PIN_SIZE_PER_NET + 1, mark + i * markStride, dist + i * LAYER * N * N, fgprev + i * LAYER * N * N, wireCost, viaCost, wires, vias, routes, LAYER, SCALE, X, Y, N, DIRECTION, routingLayerBegin, routingLayerEnd, routeLengths + batchNetIds[i], routeOffsets[batchNetIds[i] + 1] - routeOffsets[batchNetIds[i]], routeOverflows + i).name("fgroute" + std::to_string(d)).succeed(path[iter]);
                     }
                     flow[i * LOG + d].instantiate();
                 }
@@ -1080,7 +1081,7 @@ void GPUMazeRouter::getResults(double &time_cnt,
                 routeFG<<<1, SCALE * SCALE, 4 * LAYER * SCALE * SCALE * sizeof(int), streams[net]>>> (costSum,
                     pins + 1, mark, dist, fgprev, wireCost, viaCost, wires, vias, routes, LAYER, SCALE, X, Y, N,
                     DIRECTION, routingLayerBegin, routingLayerEnd, routeLengths + batchNetIds[net],
-                    routeOffsets[batchNetIds[net] + 1] - routeOffsets[batchNetIds[net]], nullptr);
+                    routeOffsets[batchNetIds[net] + 1] - routeOffsets[batchNetIds[net]], routeOverflows + net);
             }
             time_cnt += clock() - t;
             //cudaDeviceSynchronize();
