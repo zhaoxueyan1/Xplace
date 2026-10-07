@@ -8,6 +8,12 @@
 
 namespace gr {
 
+// A failed maze traceback is discarded and the complete PR/RRR sequence is
+// restarted.  Growing by only 2x made large designs repeatedly discover a
+// different short net whose initial 128-record-per-pin reserve was still too
+// small, turning one recoverable overflow into many full-chip reruns.
+constexpr int kRouteBufferGrowthFactor = 4;
+
 class RouteCapacityExceeded : public std::runtime_error {
 public:
     explicit RouteCapacityExceeded(std::vector<int> nets)
@@ -25,7 +31,7 @@ inline std::vector<int64_t> grownRouteOffsets(const int64_t* offsets, int netCou
     for (int net = 0; net < netCount; ++net) {
         const int64_t capacity = offsets[net + 1] - offsets[net];
         const int64_t limit = std::numeric_limits<int>::max() - result[net];
-        const int multiplier = grow[net] ? 2 : 1;
+        const int multiplier = grow[net] ? kRouteBufferGrowthFactor : 1;
         if (capacity <= 0 || capacity > limit / multiplier) {
             throw std::runtime_error("GPU route buffer exceeds int-indexable capacity");
         }
