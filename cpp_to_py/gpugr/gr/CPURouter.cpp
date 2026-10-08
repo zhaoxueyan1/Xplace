@@ -1408,8 +1408,9 @@ void CPURouter::routeMazeRrr(std::vector<GrNet>& nets, int rrrIters, int request
                 }
                 return false;
             };
+            bool candidateConflict = footprintConflicts(result.candidate);
             if (stateInvalidated || result.failureReason != CpuMazeFailureReason::None ||
-                footprintConflicts(result.candidate)) {
+                candidateConflict) {
                 ++conflictFallbacks;
                 const auto rebuildStart = SteadyClock::now();
                 calculateCostMaps();
@@ -1417,11 +1418,14 @@ void CPURouter::routeMazeRrr(std::vector<GrNet>& nets, int rrrIters, int request
                 const double rebuildSeconds = elapsedSeconds(rebuildStart);
                 (void)rebuildSeconds;
                 result = mazeRouter.route(mazeNet(nets[netId], netId), mazeSearchView());
+                candidateConflict = footprintConflicts(result.candidate);
             }
-            if (!result.succeeded() || footprintConflicts(result.candidate)) {
+            if (!result.succeeded() || candidateConflict) {
                 ++failed;
                 ++runStats.mazeRouteFailureCount;
-                ++runStats.mazeFailureReasons[cpuMazeFailureReasonName(result.failureReason)];
+                const char* failureReason = result.succeeded() ? "conflict"
+                                                                : cpuMazeFailureReasonName(result.failureReason);
+                ++runStats.mazeFailureReasons[failureReason];
                 const auto rollbackStart = SteadyClock::now();
                 if (oldRoutes[netId].has_value()) {
                     routeState.restore(netId, *oldRoutes[netId]);
