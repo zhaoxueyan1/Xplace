@@ -1385,6 +1385,7 @@ void CPURouter::routeMazeRrr(std::vector<GrNet>& nets, int rrrIters, int request
         const CpuMazeBatchResult batch = mazeRouter.routeBatch(mazeNets, mazeSearchView(), requestedWorkers);
         const double searchSeconds = elapsedSeconds(searchStart);
         runStats.effectiveWorkers = batch.effectiveWorkers;
+        runStats.workerClampReason = batch.workerClampReason;
         runStats.scratchBytesPerWorker = std::max(runStats.scratchBytesPerWorker, batch.scratchBytesPerWorker);
         runStats.memoryBudgetBytes = std::max(runStats.memoryBudgetBytes, batch.memoryBudgetBytes);
         runStats.peakMemoryBytes = std::max(
