@@ -59,5 +59,19 @@ int main() {
 
     state.setInactiveRoute(1);
     assert(state.rawRoutes()[1] == std::vector<int>({0}));
+
+    gr::CpuRouteState atomic;
+    atomic.resetResources(8);
+    atomic.resetRoutes(1);
+    gr::CpuRouteCandidate atomicCandidate;
+    atomicCandidate.netId = 0;
+    atomicCandidate.status = gr::CpuRouteStatus::Routed;
+    atomicCandidate.rawRoute = {5, 2, 1, 5, 1};
+    atomicCandidate.wireDeltas = {{2, 1}, {5, 1}};
+    atomic.commit(atomicCandidate);
+    atomic.wires()[2] = 0;
+    assertThrows<std::runtime_error>([&] { atomic.remove(0); });
+    assert(atomic.wires()[5] == 1);
+    assert(atomic.snapshot(0).active);
     return 0;
 }
