@@ -57,9 +57,21 @@ struct CpuMazeSearchResult {
     bool succeeded() const { return failureReason == CpuMazeFailureReason::None; }
 };
 
+struct CpuMazeBatchResult {
+    std::vector<CpuMazeSearchResult> results;
+    int requestedWorkers = 1;
+    int effectiveWorkers = 1;
+    std::size_t scratchBytesPerWorker = 0;
+    std::size_t memoryBudgetBytes = 0;
+    std::string workerClampReason = "serial_backend";
+};
+
 class CpuMazeRouter {
 public:
     CpuMazeSearchResult route(const CpuMazeNet& net, const CpuMazeSearchView& view) const;
+    CpuMazeBatchResult routeBatch(const std::vector<CpuMazeNet>& nets,
+                                  const CpuMazeSearchView& view,
+                                  int requestedWorkers) const;
 };
 
 }  // namespace gr

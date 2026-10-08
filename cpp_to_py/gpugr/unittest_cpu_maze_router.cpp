@@ -122,6 +122,23 @@ int main() {
     const std::vector<std::pair<int, int>> transposedWires{{0, 2}};
     assert(transposedResult.candidate.wireDeltas == transposedWires);
 
+    const std::vector<gr::CpuMazeNet> batchNets{direct, viaNet, accessNet};
+    const auto serialBatch = router.routeBatch(batchNets, view, 1);
+    const auto parallelBatch = router.routeBatch(batchNets, view, 2);
+    assert(serialBatch.results.size() == batchNets.size());
+    assert(parallelBatch.results.size() == batchNets.size());
+    assert(serialBatch.effectiveWorkers == 1);
+    assert(parallelBatch.effectiveWorkers >= 1 && parallelBatch.effectiveWorkers <= 2);
+    for (std::size_t index = 0; index < batchNets.size(); ++index) {
+        assert(serialBatch.results[index].candidate.rawRoute ==
+               parallelBatch.results[index].candidate.rawRoute);
+        assert(serialBatch.results[index].candidate.wireDeltas ==
+               parallelBatch.results[index].candidate.wireDeltas);
+        assert(serialBatch.results[index].candidate.viaDeltas ==
+               parallelBatch.results[index].candidate.viaDeltas);
+        assert(serialBatch.results[index].failureReason == parallelBatch.results[index].failureReason);
+    }
+
     std::fill(blockedWire.begin(), blockedWire.end(), 0);
     blockedWire[0] = 1;
     blockedWire[1] = 1;

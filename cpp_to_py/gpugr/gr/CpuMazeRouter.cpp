@@ -1,4 +1,5 @@
 #include "CpuMazeRouter.h"
+#include "CpuRouteWorkerPool.h"
 
 #include <algorithm>
 #include <functional>
@@ -455,6 +456,43 @@ CpuMazeSearchResult CpuMazeRouter::route(const CpuMazeNet& net, const CpuMazeSea
     } catch (const std::overflow_error&) {
         return failure(CpuMazeFailureReason::RouteBuffer, net.netId);
     }
+}
+
+CpuMazeBatchResult CpuMazeRouter::routeBatch(const std::vector<CpuMazeNet>& nets,
+                                             const CpuMazeSearchView& view,
+                                             int requestedWorkers) const {
+    if (requestedWorkers <= 0) {
+        throw std::invalid_argument("CPU maze router workers must be positive");
+    }
+    validateView(view);
+    if (nets.size() > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+        throw std::overflow_error("CPU maze batch net count exceeds INT_MAX");
+    }
+    const std::size_t nodeCount = checkedGridSize(view);
+    const std::size_t perNodeBytes = sizeof(int64_t) + sizeof(int) + 2 * sizeof(std::pair<int64_t, int>);
+    if (nodeCount > std::numeric_limits<std::size_t>::max() / perNodeBytes) {
+        throw std::overflow_error("CPU maze worker scratch size overflow");
+    }
+    const std::size_t scratchBytes = nodeCount * perNodeBytes;
+    const CpuWorkerLimit workerLimit =
+        chooseCpuRouteWorkers(requestedWorkers, static_cast<int>(nets.size()), scratchBytes);
+
+    CpuMazeBatchResult result;
+    result.requestedWorkers = requestedWorkers;
+    result.effectiveWorkers = workerLimit.effectiveWorkers;
+    result.scratchBytesPerWorker = scratchBytes;
+    result.memoryBudgetBytes = workerLimit.memoryBudgetBytes;
+    result.workerClampReason = workerLimit.clampReason;
+    result.results.resize(nets.size());
+    if (nets.empty()) {
+        return result;
+    }
+
+    CpuRouteWorkerPool workerPool(result.effectiveWorkers);
+    workerPool.run(nets.size(), [&](int, std::size_t index) {
+        result.results[index] = route(nets[index], view);
+    });
+    return result;
 }
 
 }  // namespace gr
