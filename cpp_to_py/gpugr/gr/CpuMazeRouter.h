@@ -47,6 +47,7 @@ struct CpuMazeSearchView {
     const std::vector<uint8_t>* blockedWire = nullptr;
     const std::vector<uint8_t>* blockedVia = nullptr;
     int overflowPenalty = 1000000;
+    int impassableCost = 10000000;
 };
 
 struct CpuMazeSearchResult {

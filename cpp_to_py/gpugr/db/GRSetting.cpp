@@ -18,12 +18,15 @@ GGRBackend parseGGRBackend(const std::string& value) {
     if (normalized == "cpu_pr_mt") {
         return GGRBackend::CPU_PR_MT;
     }
+    if (normalized == "cpu_pr_maze") {
+        return GGRBackend::CPU_PR_MAZE;
+    }
     if (normalized == "auto" || normalized.empty()) {
         return GGRBackend::AUTO;
     }
     throw std::runtime_error(
         "Unsupported gpugr backend '" + value +
-        "'. Supported backends: cuda, cpu_pr, cpu_pr_mt, auto");
+        "'. Supported backends: cuda, cpu_pr, cpu_pr_mt, cpu_pr_maze, auto");
 }
 
 std::string ggrBackendName(GGRBackend backend) {
@@ -34,6 +37,8 @@ std::string ggrBackendName(GGRBackend backend) {
             return "cpu_pr";
         case GGRBackend::CPU_PR_MT:
             return "cpu_pr_mt";
+        case GGRBackend::CPU_PR_MAZE:
+            return "cpu_pr_maze";
         case GGRBackend::AUTO:
             return "auto";
     }

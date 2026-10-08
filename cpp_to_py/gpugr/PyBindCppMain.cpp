@@ -1001,6 +1001,9 @@ bool loadGRParams(const pybind11::dict& kwargs) {
         throw std::runtime_error(
             "backend=cpu_pr_mt operation=load_gr_params only supports rrr_iters=0; CPU RRR is unsupported");
     }
+    if (gr::grSetting.rrrIters < 0) {
+        throw std::runtime_error("gpugr rrr_iters must be non-negative");
+    }
 #if !ENABLE_CUDA
     if (gr::grSetting.backend == gr::GGRBackend::CUDA) {
         throw std::runtime_error(
@@ -1050,6 +1053,42 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
             result["worker_clamp_reason"] = stats.workerClampReason;
             result["terminal_status"] = stats.terminalStatus;
             result["flute_parallel"] = stats.fluteParallel;
+            result["requested_rrr_iters"] = stats.requestedRrrIters;
+            result["completed_rrr_iters"] = stats.completedRrrIters;
+            result["best_state_restored"] = stats.bestStateRestored;
+            result["maze_route_failure_count"] = stats.mazeRouteFailureCount;
+            result["maze_failure_reasons"] = stats.mazeFailureReasons;
+            result["conflict_fallback_count"] = stats.conflictFallbackCount;
+            result["peak_memory_bytes"] = stats.peakMemoryBytes;
+            pybind11::list rrrIterations;
+            for (const auto& iteration : stats.rrrIterations) {
+                pybind11::dict item;
+                item["iteration"] = iteration.iteration;
+                item["selected_net_count"] = iteration.selectedNetCount;
+                item["rerouted_net_count"] = iteration.reroutedNetCount;
+                item["failed_net_count"] = iteration.failedNetCount;
+                item["overflow_net_count"] = iteration.overflowNetCount;
+                item["overflow_wire_resource_count"] = iteration.overflowWireResourceCount;
+                item["overflow_via_resource_count"] = iteration.overflowViaResourceCount;
+                item["overflow_wire_excess"] = iteration.overflowWireExcess;
+                item["overflow_via_excess"] = iteration.overflowViaExcess;
+                item["wire_length"] = iteration.wireLength;
+                item["via_count"] = iteration.viaCount;
+                item["routed_net_count"] = iteration.routedNetCount;
+                item["route_hash64"] = iteration.routeHash64;
+                item["wire_map_hash64"] = iteration.wireMapHash64;
+                item["via_map_hash64"] = iteration.viaMapHash64;
+                item["best_state"] = iteration.bestState;
+                item["parallel_batch_count"] = iteration.parallelBatchCount;
+                item["conflict_fallback_count"] = iteration.conflictFallbackCount;
+                item["search_seconds"] = iteration.searchSeconds;
+                item["cost_rebuild_seconds"] = iteration.costRebuildSeconds;
+                item["commit_seconds"] = iteration.commitSeconds;
+                item["rollback_seconds"] = iteration.rollbackSeconds;
+                item["total_seconds"] = iteration.totalSeconds;
+                rrrIterations.append(item);
+            }
+            result["rrr_iterations"] = rrrIterations;
             result["cost_map_seconds"] = stats.costMapSeconds;
             result["batch_schedule_seconds"] = stats.batchScheduleSeconds;
             result["prepare_seconds"] = stats.prepareSeconds;

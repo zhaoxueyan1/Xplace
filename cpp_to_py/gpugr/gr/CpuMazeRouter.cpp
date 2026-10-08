@@ -81,6 +81,9 @@ void validateView(const CpuMazeSearchView& view) {
     if (view.overflowPenalty < 0) {
         throw std::invalid_argument("CPU maze overflow penalty must be non-negative");
     }
+    if (view.impassableCost <= 0) {
+        throw std::invalid_argument("CPU maze impassable cost must be positive");
+    }
 }
 
 int coordinateOffset(const GridShape& shape, int layer, int x, int y) {
@@ -117,11 +120,15 @@ bool layerEnabled(const CpuMazeSearchView& view, int layer) {
     return layer >= view.routingLayerBegin && layer <= view.routingLayerEnd;
 }
 
-int64_t mapValue(const std::vector<int>* map, int encoded, int fallback) {
+int64_t mapCost(const std::vector<int>* map, int encoded, int fallback, int impassableCost) {
     if (map == nullptr) {
         return fallback;
     }
-    return std::max(1, (*map)[static_cast<std::size_t>(encoded)]);
+    const int value = (*map)[static_cast<std::size_t>(encoded)];
+    if (value >= impassableCost) {
+        return INF_DISTANCE;
+    }
+    return std::max(1, value);
 }
 
 bool isBlocked(const std::vector<uint8_t>* map, int encoded) {
@@ -132,7 +139,7 @@ int64_t wireStepCost(const CpuMazeSearchView& view, int encoded) {
     if (isBlocked(view.blockedWire, encoded)) {
         return INF_DISTANCE;
     }
-    int64_t cost = mapValue(view.wireCost, encoded, 1);
+    int64_t cost = mapCost(view.wireCost, encoded, 1, view.impassableCost);
     if (view.capacity != nullptr) {
         const float fixed = view.fixedUsage == nullptr
                                 ? 0.0f
@@ -151,7 +158,7 @@ int64_t viaStepCost(const CpuMazeSearchView& view, int encoded) {
     if (isBlocked(view.blockedVia, encoded)) {
         return INF_DISTANCE;
     }
-    int64_t cost = mapValue(view.viaCost, encoded, 1);
+    int64_t cost = mapCost(view.viaCost, encoded, 1, view.impassableCost);
     if (view.capacity != nullptr) {
         const float fixed = view.fixedUsage == nullptr
                                 ? 0.0f

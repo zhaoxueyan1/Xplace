@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <map>
 #include <string>
 #include <utility>
 #include <vector>
@@ -61,6 +62,39 @@ struct CpuRouteRunStats {
     std::string workerClampReason = "serial_backend";
     std::string terminalStatus = "not_started";
     bool fluteParallel = false;
+    int requestedRrrIters = 0;
+    int completedRrrIters = 0;
+    bool bestStateRestored = false;
+    int mazeRouteFailureCount = 0;
+    int conflictFallbackCount = 0;
+    std::size_t peakMemoryBytes = 0;
+    std::map<std::string, int> mazeFailureReasons;
+    struct RrrIteration {
+        int iteration = 0;
+        int selectedNetCount = 0;
+        int reroutedNetCount = 0;
+        int failedNetCount = 0;
+        int overflowNetCount = 0;
+        int overflowWireResourceCount = 0;
+        int overflowViaResourceCount = 0;
+        double overflowWireExcess = 0.0;
+        double overflowViaExcess = 0.0;
+        int wireLength = 0;
+        int viaCount = 0;
+        int routedNetCount = 0;
+        uint64_t routeHash64 = 0;
+        uint64_t wireMapHash64 = 0;
+        uint64_t viaMapHash64 = 0;
+        bool bestState = false;
+        int parallelBatchCount = 0;
+        int conflictFallbackCount = 0;
+        double searchSeconds = 0.0;
+        double costRebuildSeconds = 0.0;
+        double commitSeconds = 0.0;
+        double rollbackSeconds = 0.0;
+        double totalSeconds = 0.0;
+    };
+    std::vector<RrrIteration> rrrIterations;
     double costMapSeconds = 0.0;
     double batchScheduleSeconds = 0.0;
     double prepareSeconds = 0.0;

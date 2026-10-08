@@ -16,6 +16,11 @@ struct CpuRouteSnapshot {
     std::vector<int> viaDeltas;
 };
 
+struct CpuRouteCheckpoint {
+    std::vector<CpuRouteSnapshot> routes;
+    std::vector<std::vector<int>> rawRoutes;
+};
+
 class CpuRouteState {
 public:
     void resetResources(std::size_t resourceCount);
@@ -34,6 +39,8 @@ public:
     CpuRouteSnapshot remove(int netId);
     void restore(int netId, const CpuRouteSnapshot& snapshot);
     CpuRouteSnapshot snapshot(int netId) const;
+    CpuRouteCheckpoint checkpoint() const;
+    void restoreCheckpoint(const CpuRouteCheckpoint& checkpoint);
 
 private:
     void validateNetId(int netId) const;

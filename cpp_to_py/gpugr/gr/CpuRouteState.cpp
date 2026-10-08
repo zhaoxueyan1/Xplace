@@ -132,4 +132,35 @@ CpuRouteSnapshot CpuRouteState::snapshot(int netId) const {
     return routeSnapshots_[static_cast<std::size_t>(netId)];
 }
 
+CpuRouteCheckpoint CpuRouteState::checkpoint() const {
+    return {routeSnapshots_, rawRoutes_};
+}
+
+void CpuRouteState::restoreCheckpoint(const CpuRouteCheckpoint& checkpoint) {
+    if (checkpoint.routes.size() != checkpoint.rawRoutes.size() ||
+        checkpoint.routes.size() != routeSnapshots_.size()) {
+        throw std::runtime_error("CPU route state checkpoint net count mismatch");
+    }
+    std::vector<int> rebuiltWires(wires_.size(), 0);
+    std::vector<int> rebuiltVias(vias_.size(), 0);
+    for (const CpuRouteSnapshot& snapshot : checkpoint.routes) {
+        validateSnapshot(snapshot);
+        if (!snapshot.active) {
+            continue;
+        }
+        for (const auto& [start, span] : snapshot.wireDeltas) {
+            for (int offset = 0; offset < span; ++offset) {
+                ++rebuiltWires[static_cast<std::size_t>(start + offset)];
+            }
+        }
+        for (int encoded : snapshot.viaDeltas) {
+            ++rebuiltVias[static_cast<std::size_t>(encoded)];
+        }
+    }
+    wires_.swap(rebuiltWires);
+    vias_.swap(rebuiltVias);
+    routeSnapshots_ = checkpoint.routes;
+    rawRoutes_ = checkpoint.rawRoutes;
+}
+
 }  // namespace gr

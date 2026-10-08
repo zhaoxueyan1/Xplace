@@ -36,6 +36,10 @@ bool isCpuPatternBackend(GGRBackend backend) {
     return backend == GGRBackend::CPU_PR || backend == GGRBackend::CPU_PR_MT;
 }
 
+bool isCpuRouteBackend(GGRBackend backend) {
+    return isCpuPatternBackend(backend) || backend == GGRBackend::CPU_PR_MAZE;
+}
+
 }  // namespace
 
 RouteForce::RouteForce(std::shared_ptr<gr::GRDatabase> grdb_) : grdb(*grdb_) {}
@@ -74,7 +78,7 @@ void RouteForce::run_ggr() {
     utils::timer T_total;
     T_total.start();
     resolveBackend();
-    if (isCpuPatternBackend(backend)) {
+    if (isCpuRouteBackend(backend)) {
         cpuRouter.initialize(grdb, ggrBackendName(backend));
         cpuRouter.setMap(
             grdb.capacity,
@@ -87,6 +91,8 @@ void RouteForce::run_ggr() {
         T.start();
         if (backend == GGRBackend::CPU_PR_MT) {
             cpuRouter.routeParallel(grdb.grNets, grSetting.requestedWorkers);
+        } else if (backend == GGRBackend::CPU_PR_MAZE) {
+            cpuRouter.routeMazeRrr(grdb.grNets, grSetting.rrrIters, grSetting.requestedWorkers);
         } else {
             cpuRouter.route(grdb.grNets);
         }
@@ -176,7 +182,7 @@ void RouteForce::run_ggr() {
 }
 
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> RouteForce::getDemandMap() {
-    if (isCpuPatternBackend(backend)) return cpuRouter.getDemandMap();
+    if (isCpuRouteBackend(backend)) return cpuRouter.getDemandMap();
 #if ENABLE_CUDA
     return router.getDemandMap();
 #else
@@ -185,7 +191,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> RouteForce::getDemandMap
 }
 
 torch::Tensor RouteForce::getCapacityMap() {
-    if (isCpuPatternBackend(backend)) return cpuRouter.getCapacityMap();
+    if (isCpuRouteBackend(backend)) return cpuRouter.getCapacityMap();
 #if ENABLE_CUDA
     return router.getCapacityMap();
 #else
@@ -194,7 +200,7 @@ torch::Tensor RouteForce::getCapacityMap() {
 }
 
 torch::Tensor RouteForce::getRawWireDemandMap() {
-    if (isCpuPatternBackend(backend)) return cpuRouter.getRawWireDemandMap();
+    if (isCpuRouteBackend(backend)) return cpuRouter.getRawWireDemandMap();
 #if ENABLE_CUDA
     return router.getRawWireDemandMap();
 #else
@@ -203,7 +209,7 @@ torch::Tensor RouteForce::getRawWireDemandMap() {
 }
 
 torch::Tensor RouteForce::getFixUsageMap() {
-    if (isCpuPatternBackend(backend)) return cpuRouter.getFixUsageMap();
+    if (isCpuRouteBackend(backend)) return cpuRouter.getFixUsageMap();
     return buildGridGraphMapTensor(
         grdb.fixTmpUsage,
         grdb.nLayers,
@@ -214,7 +220,7 @@ torch::Tensor RouteForce::getFixUsageMap() {
 }
 
 torch::Tensor RouteForce::getMovUsageMap() {
-    if (isCpuPatternBackend(backend)) return cpuRouter.getMovUsageMap();
+    if (isCpuRouteBackend(backend)) return cpuRouter.getMovUsageMap();
     return buildGridGraphMapTensor(
         grdb.movTmpUsage,
         grdb.nLayers,
@@ -237,7 +243,7 @@ torch::Tensor RouteForce::calcRouteGrad(torch::Tensor mask_map,
                                         float unit_wire_cost,
                                         float unit_via_cost,
                                         int num_nodes) {
-    if (isCpuPatternBackend(backend)) unsupported("route_grad");
+    if (isCpuRouteBackend(backend)) unsupported("route_grad");
 #if ENABLE_CUDA
     return router.calcRouteGrad(mask_map,
                                 wire_dmd_map_2d,
@@ -268,7 +274,7 @@ torch::Tensor RouteForce::calcFillerRouteGrad(torch::Tensor filler_pos,
                                               int num_bin_x,
                                               int num_bin_y,
                                               int num_fillers) {
-    if (isCpuPatternBackend(backend)) unsupported("filler_route_grad");
+    if (isCpuRouteBackend(backend)) unsupported("filler_route_grad");
 #if ENABLE_CUDA
     return router.calcFillerRouteGrad(filler_pos,
                                       filler_size,
@@ -287,7 +293,7 @@ torch::Tensor RouteForce::calcFillerRouteGrad(torch::Tensor filler_pos,
 }
 
 torch::Tensor RouteForce::calcPseudoPinGrad(torch::Tensor node_pos, torch::Tensor pseudo_pin_pos, float gamma) {
-    if (isCpuPatternBackend(backend)) unsupported("pseudo_grad");
+    if (isCpuRouteBackend(backend)) unsupported("pseudo_grad");
 #if ENABLE_CUDA
     return router.calcPseudoPinGrad(node_pos, pseudo_pin_pos, gamma);
 #else
@@ -306,7 +312,7 @@ torch::Tensor RouteForce::calcNodeInflateRatio(torch::Tensor node_pos,
                                                int num_bin_x,
                                                int num_bin_y,
                                                bool use_weighted_inflation) {
-    if (isCpuPatternBackend(backend)) unsupported("inflate_ratio");
+    if (isCpuRouteBackend(backend)) unsupported("inflate_ratio");
 #if ENABLE_CUDA
     return router.calcNodeInflateRatio(node_pos,
                                        node_size,
@@ -328,7 +334,7 @@ torch::Tensor RouteForce::calcInflatedPinRelCpos(torch::Tensor node_inflate_rati
                                                  torch::Tensor old_pin_rel_cpos,
                                                  torch::Tensor pin_id2node_id,
                                                  int num_movable_conn_nodes) {
-    if (isCpuPatternBackend(backend)) unsupported("inflate_pin_rel_cpos");
+    if (isCpuRouteBackend(backend)) unsupported("inflate_pin_rel_cpos");
 #if ENABLE_CUDA
     return router.calcInflatedPinRelCpos(node_inflate_ratio, old_pin_rel_cpos, pin_id2node_id, num_movable_conn_nodes);
 #else
@@ -337,7 +343,7 @@ torch::Tensor RouteForce::calcInflatedPinRelCpos(torch::Tensor node_inflate_rati
 }
 
 int RouteForce::getNumOvflNets() {
-    if (isCpuPatternBackend(backend)) return cpuRouter.getNumOvflNets();
+    if (isCpuRouteBackend(backend)) return cpuRouter.getNumOvflNets();
 #if ENABLE_CUDA
     return router.getNumOvflNets();
 #else
@@ -362,7 +368,7 @@ std::vector<std::string> RouteForce::getRoutingLayerNames() const {
 }
 
 std::vector<std::vector<int>> RouteForce::getRawRoutes() {
-    if (isCpuPatternBackend(backend)) return cpuRouter.getRawRoutes();
+    if (isCpuRouteBackend(backend)) return cpuRouter.getRawRoutes();
 #if ENABLE_CUDA
     return router.getRawRoutes();
 #else
@@ -371,7 +377,7 @@ std::vector<std::vector<int>> RouteForce::getRawRoutes() {
 }
 
 CpuRouteRunStats RouteForce::getRunStats() const {
-    if (isCpuPatternBackend(backend)) {
+    if (isCpuRouteBackend(backend)) {
         return cpuRouter.getRunStats();
     }
     CpuRouteRunStats stats;

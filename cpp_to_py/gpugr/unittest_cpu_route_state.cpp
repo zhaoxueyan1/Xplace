@@ -73,5 +73,13 @@ int main() {
     assertThrows<std::runtime_error>([&] { atomic.remove(0); });
     assert(atomic.wires()[5] == 1);
     assert(atomic.snapshot(0).active);
+
+    const gr::CpuRouteCheckpoint checkpoint = state.checkpoint();
+    state.resetResources(16);
+    state.resetRoutes(2);
+    state.restoreCheckpoint(checkpoint);
+    assert(state.rawRoutes()[0] == std::vector<int>({1}));
+    assert(state.wires()[2] == 0 && state.wires()[3] == 0);
+    assert(state.vias()[7] == 0);
     return 0;
 }

@@ -4,6 +4,7 @@
 #include "gpugr/db/GRDatabase.h"
 #include "gpugr/db/GrNet.h"
 #include "gpugr/gr/CpuRouteBatchScheduler.h"
+#include "gpugr/gr/CpuMazeRouter.h"
 #include "gpugr/gr/CpuRouteState.h"
 #include "gpugr/gr/CpuRouteTypes.h"
 #include <torch/extension.h>
@@ -25,6 +26,7 @@ public:
                 const std::vector<float>& movRaw);
     void route(std::vector<GrNet>& nets);
     void routeParallel(std::vector<GrNet>& nets, int requestedWorkers);
+    void routeMazeRrr(std::vector<GrNet>& nets, int rrrIters, int requestedWorkers);
 
     std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> getDemandMap();
     torch::Tensor getCapacityMap();
@@ -71,6 +73,8 @@ private:
                                   std::size_t end) const;
     void setNetRouteFromRaw(GrNet& net, const std::vector<int>& rawRoute) const;
     void markOverflowNets(const std::vector<GrNet>& nets);
+    CpuMazeSearchView mazeSearchView() const;
+    CpuMazeNet mazeNet(const GrNet& net, int netId) const;
     float twoCellsViaUsage(int encoded) const;
     float inCellViaUsage(int encoded) const;
     float inCellUsedArea(int encoded) const;
