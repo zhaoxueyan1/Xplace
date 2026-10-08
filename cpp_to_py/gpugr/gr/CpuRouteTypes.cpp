@@ -82,4 +82,34 @@ std::size_t CpuRouteScratch::bytes() const {
            checkedMultiply(mid.capacity(), sizeof(mid.front()));
 }
 
+static void hashWord(uint64_t value, uint64_t& hash) {
+    constexpr uint64_t FNV_PRIME = 1099511628211ULL;
+    for (int byte = 0; byte < 8; ++byte) {
+        hash ^= (value >> (byte * 8)) & 0xffULL;
+        hash *= FNV_PRIME;
+    }
+}
+
+uint64_t hashIntVector(const std::vector<int>& values) {
+    uint64_t hash = 1469598103934665603ULL;
+    hashWord(values.size(), hash);
+    for (int value : values) {
+        hashWord(static_cast<uint64_t>(static_cast<int64_t>(value)), hash);
+    }
+    return hash;
+}
+
+uint64_t hashRawRoutes(const std::vector<std::vector<int>>& routes) {
+    uint64_t hash = 1469598103934665603ULL;
+    hashWord(routes.size(), hash);
+    for (const auto& route : routes) {
+        hashWord(route.size(), hash);
+        for (int value : route) {
+            hashWord(static_cast<uint64_t>(static_cast<int64_t>(value)), hash);
+        }
+    }
+    return hash;
+}
+
+
 }  // namespace gr

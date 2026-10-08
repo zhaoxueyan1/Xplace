@@ -74,7 +74,7 @@ private:
     void setNetRouteFromRaw(GrNet& net, const std::vector<int>& rawRoute) const;
     void markOverflowNets(const std::vector<GrNet>& nets);
     CpuMazeSearchView mazeSearchView() const;
-    CpuMazeNet mazeNet(const GrNet& net, int netId) const;
+    CpuMazeNet mazeNet(GrNet& net, int netId) const;
     float twoCellsViaUsage(int encoded) const;
     float inCellViaUsage(int encoded) const;
     float inCellUsedArea(int encoded) const;
@@ -101,10 +101,14 @@ private:
     std::vector<int64_t> costSum;
     std::vector<int> overflowWire;
     std::vector<int> overflowVia;
+    std::vector<double> unitShortCost;
     std::vector<float> unitShortCostDiscounted;
     float unitViaCost = 4.0f;
     float unitViaMultiplier = 1.0f;
     float logisticSlope = 1.0f;
+    int mazeHorizontalLowerBound = 1;
+    int mazeVerticalLowerBound = 1;
+    int mazeViaLowerBound = 1;
     int numOvflNets = 0;
     CpuRouteState routeState;
     CpuRouteRunStats runStats;

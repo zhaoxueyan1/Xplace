@@ -210,5 +210,28 @@ int main() {
     assert(blocked.failureReason == gr::CpuMazeFailureReason::Unreachable);
     assert(blocked.candidate.rawRoute == std::vector<int>({-1}));
     assert(gr::cpuMazeFailureReasonName(blocked.failureReason) == std::string("unreachable"));
+
+    // Reusing scratch after a failure, a shape change and a cost/obstacle
+    // change must be identical to a search with freshly initialized storage.
+    gr::CpuMazeSearchScratch scratch;
+    assert(router.route(direct, view, scratch).failureReason == blocked.failureReason);
+    const auto resized = router.route(rectangularNet, rectangularView, scratch);
+    assert(resized.candidate.rawRoute == rectangularResult.candidate.rawRoute);
+    assert(resized.expandedStates == rectangularResult.expandedStates);
+    std::fill(blockedWire.begin(), blockedWire.end(), 0);
+    const auto reused = router.route(viaNet, view, scratch);
+    const auto fresh = router.route(viaNet, view);
+    assert(reused.candidate.rawRoute == fresh.candidate.rawRoute);
+    assert(reused.expandedStates == fresh.expandedStates);
+
+    gr::CpuMazeNet steiner{9, {{{0, 0, 0}}, {{0, 2, 0}}}};
+    steiner.branches = {{{{0, 1, 0}, {1, 1, 0}, {2, 1, 0}}, false},
+                        {{{0, 2, 0}}, true}};
+    const auto steinerRoute = router.route(steiner, view);
+    assert(steinerRoute.succeeded());
+    assert(steinerRoute.candidate.viaDeltas.empty());
+    assert(steinerRoute.candidate.rawRoute == directRawRoute);
+    steiner.branches.pop_back();
+    assert(router.route(steiner, view).failureReason == gr::CpuMazeFailureReason::Unreachable);
     return 0;
 }

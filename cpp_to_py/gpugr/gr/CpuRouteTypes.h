@@ -9,6 +9,9 @@
 
 namespace gr {
 
+uint64_t hashIntVector(const std::vector<int>& values);
+uint64_t hashRawRoutes(const std::vector<std::vector<int>>& routes);
+
 struct CpuRouteScratch {
     std::vector<int64_t> map;
     std::vector<int> prev;
@@ -89,11 +92,17 @@ struct CpuRouteRunStats {
         int parallelBatchCount = 0;
         int conflictFallbackCount = 0;
         double searchSeconds = 0.0;
+        double fallbackSearchSeconds = 0.0;
+        int maxActiveSearches = 0;
+        double workerSearchSeconds = 0.0;
         double costRebuildSeconds = 0.0;
         double commitSeconds = 0.0;
         double rollbackSeconds = 0.0;
         double totalSeconds = 0.0;
     };
+    bool hasRouteQor = false;
+    RrrIteration initialRouteQor;
+    RrrIteration acceptedRouteQor;
     std::vector<RrrIteration> rrrIterations;
     double costMapSeconds = 0.0;
     double batchScheduleSeconds = 0.0;

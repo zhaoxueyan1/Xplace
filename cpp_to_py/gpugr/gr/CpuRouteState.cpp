@@ -3,6 +3,7 @@
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 
 namespace gr {
 
@@ -36,6 +37,34 @@ void CpuRouteState::validateNetId(int netId) const {
 }
 
 void CpuRouteState::validateSnapshot(const CpuRouteSnapshot& snapshot) const {
+    if (!snapshot.active) {
+        if (!snapshot.wireDeltas.empty() || !snapshot.viaDeltas.empty()) {
+            throw std::runtime_error("CPU route state inactive route has resource deltas");
+        }
+    } else {
+        const auto& raw = snapshot.rawRoute;
+        if (raw.empty() || raw.size() % 2 != 1 || raw[0] != static_cast<int>(raw.size())) {
+            throw std::runtime_error("CPU route state malformed raw route");
+        }
+        std::size_t wire = 0, via = 0;
+        for (std::size_t index = 1; index + 1 < raw.size(); index += 2) {
+            if (raw[index + 1] == -1) {
+                if (via >= snapshot.viaDeltas.size() || snapshot.viaDeltas[via++] != raw[index]) {
+                    throw std::runtime_error("CPU route state raw via and delta mismatch");
+                }
+            } else if (raw[index + 1] > 0) {
+                if (wire >= snapshot.wireDeltas.size() ||
+                    snapshot.wireDeltas[wire++] != std::make_pair(raw[index], raw[index + 1])) {
+                    throw std::runtime_error("CPU route state raw wire and delta mismatch");
+                }
+            } else {
+                throw std::runtime_error("CPU route state invalid raw span");
+            }
+        }
+        if (wire != snapshot.wireDeltas.size() || via != snapshot.viaDeltas.size()) {
+            throw std::runtime_error("CPU route state extra resource deltas");
+        }
+    }
     for (const auto& [start, span] : snapshot.wireDeltas) {
         validateDeltaRange(start, span, wires_.size(), "wire");
     }
@@ -52,16 +81,18 @@ void CpuRouteState::applyDeltas(const CpuRouteSnapshot& snapshot, int direction)
     }
     validateSnapshot(snapshot);
     if (direction < 0) {
+        std::unordered_map<int, int> removalCounts;
         for (const auto& [start, span] : snapshot.wireDeltas) {
             for (int offset = 0; offset < span; ++offset) {
                 int& usage = wires_[static_cast<std::size_t>(start + offset)];
-                if (usage < 1) {
+                if (usage < ++removalCounts[start + offset]) {
                     throw std::runtime_error("CPU route state wire usage underflow");
                 }
             }
         }
+        removalCounts.clear();
         for (int encoded : snapshot.viaDeltas) {
-            if (vias_[static_cast<std::size_t>(encoded)] < 1) {
+            if (vias_[static_cast<std::size_t>(encoded)] < ++removalCounts[encoded]) {
                 throw std::runtime_error("CPU route state via usage underflow");
             }
         }

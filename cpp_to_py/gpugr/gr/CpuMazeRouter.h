@@ -15,9 +15,15 @@ struct CpuMazePoint {
     int y = -1;
 };
 
+struct CpuMazeBranch {
+    std::vector<CpuMazePoint> targets;
+    bool pinAccess = false;
+};
+
 struct CpuMazeNet {
     int netId = -1;
     std::vector<std::vector<CpuMazePoint>> pinGroups;
+    std::vector<CpuMazeBranch> branches{};
 };
 
 enum class CpuMazeFailureReason {
@@ -48,6 +54,10 @@ struct CpuMazeSearchView {
     const std::vector<uint8_t>* blockedVia = nullptr;
     int overflowPenalty = 1000000;
     int impassableCost = 10000000;
+    // Lower bounds remain valid as commit only increases congestion costs.
+    int horizontalWireLowerBound = 1;
+    int verticalWireLowerBound = 1;
+    int viaLowerBound = 1;
 };
 
 struct CpuMazeSearchResult {
@@ -58,6 +68,16 @@ struct CpuMazeSearchResult {
     bool succeeded() const { return failureReason == CpuMazeFailureReason::None; }
 };
 
+// One instance per worker, also reused by deterministic serial re-search.
+// Reset only visited nodes between branches rather than clearing the chip.
+struct CpuMazeSearchScratch {
+    std::vector<int64_t> distances;
+    std::vector<int> previous;
+    std::vector<int> touched;
+
+    void reset(std::size_t nodeCount);
+};
+
 struct CpuMazeBatchResult {
     std::vector<CpuMazeSearchResult> results;
     int requestedWorkers = 1;
@@ -65,11 +85,16 @@ struct CpuMazeBatchResult {
     std::size_t scratchBytesPerWorker = 0;
     std::size_t memoryBudgetBytes = 0;
     std::string workerClampReason = "serial_backend";
+    int maxActiveSearches = 0;
+    double workerSearchSeconds = 0.0;
 };
 
 class CpuMazeRouter {
 public:
     CpuMazeSearchResult route(const CpuMazeNet& net, const CpuMazeSearchView& view) const;
+    CpuMazeSearchResult route(const CpuMazeNet& net,
+                             const CpuMazeSearchView& view,
+                             CpuMazeSearchScratch& scratch) const;
     CpuMazeBatchResult routeBatch(const std::vector<CpuMazeNet>& nets,
                                   const CpuMazeSearchView& view,
                                   int requestedWorkers) const;

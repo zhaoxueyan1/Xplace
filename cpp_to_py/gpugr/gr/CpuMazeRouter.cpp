@@ -2,10 +2,13 @@
 #include "CpuRouteWorkerPool.h"
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <functional>
 #include <limits>
 #include <queue>
 #include <stdexcept>
+#include <tuple>
 #include <unordered_set>
 #include <utility>
 
@@ -83,6 +86,9 @@ void validateView(const CpuMazeSearchView& view) {
     }
     if (view.impassableCost <= 0) {
         throw std::invalid_argument("CPU maze impassable cost must be positive");
+    }
+    if (view.horizontalWireLowerBound < 1 || view.verticalWireLowerBound < 1 || view.viaLowerBound < 1) {
+        throw std::invalid_argument("CPU maze heuristic cost bounds must be positive");
     }
 }
 
@@ -227,27 +233,44 @@ bool validPoint(const CpuMazeSearchView& view, const GridShape& shape, const Cpu
 SearchPath shortestPath(const CpuMazeSearchView& view,
                         const GridShape& shape,
                         const std::vector<int>& sources,
-                        const std::unordered_set<int>& targets) {
+                        const std::unordered_set<int>& targets,
+                        CpuMazeSearchScratch& scratch) {
     const std::size_t nodeCount = shape.stride * static_cast<std::size_t>(shape.layerCount);
-    std::vector<int64_t> distances(nodeCount, INF_DISTANCE);
-    std::vector<int> previous(nodeCount, -1);
-    std::priority_queue<std::pair<int64_t, int>,
-                        std::vector<std::pair<int64_t, int>>,
-                        std::greater<std::pair<int64_t, int>>>
+    scratch.reset(nodeCount);
+    auto& distances = scratch.distances;
+    auto& previous = scratch.previous;
+    // The minimum legal step costs give an admissible, consistent Manhattan
+    // heuristic. A* searches the same full grid; no detour bound is imposed.
+    auto remainingCost = [&](int node) {
+        const auto point = decode(shape, node);
+        int64_t minimum = INF_DISTANCE;
+        for (int target : targets) {
+            const auto goal = decode(shape, target);
+            minimum = std::min(minimum,
+                static_cast<int64_t>(std::abs(point.x - goal.x)) * view.horizontalWireLowerBound +
+                static_cast<int64_t>(std::abs(point.y - goal.y)) * view.verticalWireLowerBound +
+                static_cast<int64_t>(std::abs(point.layer - goal.layer)) * view.viaLowerBound);
+        }
+        return minimum;
+    };
+    using FrontierEntry = std::tuple<int64_t, int64_t, int>;
+    std::priority_queue<FrontierEntry, std::vector<FrontierEntry>, std::greater<FrontierEntry>>
         frontier;
     std::vector<int> orderedSources = sources;
     std::sort(orderedSources.begin(), orderedSources.end());
     orderedSources.erase(std::unique(orderedSources.begin(), orderedSources.end()), orderedSources.end());
     for (int source : orderedSources) {
+        scratch.touched.push_back(source);
         distances[static_cast<std::size_t>(source)] = 0;
         previous[static_cast<std::size_t>(source)] = source;
-        frontier.emplace(0, source);
+        frontier.emplace(remainingCost(source), 0, source);
     }
 
     SearchPath result;
     int reached = -1;
     while (!frontier.empty()) {
-        const auto [distance, current] = frontier.top();
+        const auto [priority, distance, current] = frontier.top();
+        (void)priority;
         frontier.pop();
         if (distance != distances[static_cast<std::size_t>(current)]) {
             continue;
@@ -262,9 +285,12 @@ SearchPath shortestPath(const CpuMazeSearchView& view,
             (void)via;
             const int64_t nextDistance = distance + stepCost;
             if (nextDistance < distances[static_cast<std::size_t>(next)]) {
+                if (distances[static_cast<std::size_t>(next)] == INF_DISTANCE) {
+                    scratch.touched.push_back(next);
+                }
                 distances[static_cast<std::size_t>(next)] = nextDistance;
                 previous[static_cast<std::size_t>(next)] = current;
-                frontier.emplace(nextDistance, next);
+                frontier.emplace(nextDistance + remainingCost(next), nextDistance, next);
             }
         });
     }
@@ -394,6 +420,19 @@ CpuMazeSearchResult failure(CpuMazeFailureReason reason, int netId, std::size_t 
 
 }  // namespace
 
+void CpuMazeSearchScratch::reset(std::size_t nodeCount) {
+    if (distances.size() != nodeCount || previous.size() != nodeCount) {
+        distances.assign(nodeCount, INF_DISTANCE);
+        previous.assign(nodeCount, -1);
+    } else {
+        for (int node : touched) {
+            distances[static_cast<std::size_t>(node)] = INF_DISTANCE;
+            previous[static_cast<std::size_t>(node)] = -1;
+        }
+    }
+    touched.clear();
+}
+
 const char* cpuMazeFailureReasonName(CpuMazeFailureReason reason) {
     switch (reason) {
         case CpuMazeFailureReason::None:
@@ -409,6 +448,13 @@ const char* cpuMazeFailureReasonName(CpuMazeFailureReason reason) {
 }
 
 CpuMazeSearchResult CpuMazeRouter::route(const CpuMazeNet& net, const CpuMazeSearchView& view) const {
+    CpuMazeSearchScratch scratch;
+    return route(net, view, scratch);
+}
+
+CpuMazeSearchResult CpuMazeRouter::route(const CpuMazeNet& net,
+                                        const CpuMazeSearchView& view,
+                                        CpuMazeSearchScratch& scratch) const {
     try {
         validateView(view);
         const GridShape shape = shapeOf(view);
@@ -436,9 +482,15 @@ CpuMazeSearchResult CpuMazeRouter::route(const CpuMazeNet& net, const CpuMazeSea
             return failure(CpuMazeFailureReason::InvalidInput, net.netId);
         }
 
-        for (std::size_t groupIndex = 1; groupIndex < net.pinGroups.size(); ++groupIndex) {
+        std::vector<CpuMazeBranch> branches = net.branches;
+        if (branches.empty()) {
+            for (std::size_t index = 1; index < net.pinGroups.size(); ++index) {
+                branches.push_back({net.pinGroups[index], true});
+            }
+        }
+        for (const auto& branch : branches) {
             std::unordered_set<int> targets;
-            for (const CpuMazePoint& point : net.pinGroups[groupIndex]) {
+            for (const CpuMazePoint& point : branch.targets) {
                 if (!validPoint(view, shape, point)) {
                     return failure(CpuMazeFailureReason::InvalidInput, net.netId, result.expandedStates);
                 }
@@ -447,18 +499,28 @@ CpuMazeSearchResult CpuMazeRouter::route(const CpuMazeNet& net, const CpuMazeSea
             if (targets.empty()) {
                 return failure(CpuMazeFailureReason::InvalidInput, net.netId, result.expandedStates);
             }
-            const SearchPath path = shortestPath(view, shape, connected, targets);
+            const SearchPath path = shortestPath(view, shape, connected, targets, scratch);
             result.expandedStates += path.expandedStates;
             if (path.nodes.empty()) {
                 return failure(CpuMazeFailureReason::Unreachable, net.netId, result.expandedStates);
             }
             appendPath(result.candidate, path.nodes, shape);
-            if (!appendPinGroupVias(result.candidate, view, shape, net.pinGroups[groupIndex])) {
+            if (branch.pinAccess && !appendPinGroupVias(result.candidate, view, shape, branch.targets)) {
                 return failure(CpuMazeFailureReason::InvalidInput, net.netId, result.expandedStates);
             }
             connected.insert(connected.end(), path.nodes.begin(), path.nodes.end());
-            for (const CpuMazePoint& point : net.pinGroups[groupIndex]) {
-                connected.push_back(encode(shape, point));
+            if (branch.pinAccess) {
+                for (const CpuMazePoint& point : branch.targets) {
+                    connected.push_back(encode(shape, point));
+                }
+            }
+        }
+        std::sort(connected.begin(), connected.end());
+        for (const auto& group : net.pinGroups) {
+            for (const auto& point : group) {
+                if (!std::binary_search(connected.begin(), connected.end(), encode(shape, point))) {
+                    return failure(CpuMazeFailureReason::Unreachable, net.netId, result.expandedStates);
+                }
             }
         }
         if (result.candidate.rawRoute.size() > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
@@ -470,6 +532,8 @@ CpuMazeSearchResult CpuMazeRouter::route(const CpuMazeNet& net, const CpuMazeSea
     } catch (const std::invalid_argument&) {
         return failure(CpuMazeFailureReason::InvalidInput, net.netId);
     } catch (const std::overflow_error&) {
+        return failure(CpuMazeFailureReason::RouteBuffer, net.netId);
+    } catch (const std::bad_alloc&) {
         return failure(CpuMazeFailureReason::RouteBuffer, net.netId);
     }
 }
@@ -485,7 +549,7 @@ CpuMazeBatchResult CpuMazeRouter::routeBatch(const std::vector<CpuMazeNet>& nets
         throw std::overflow_error("CPU maze batch net count exceeds INT_MAX");
     }
     const std::size_t nodeCount = checkedGridSize(view);
-    const std::size_t perNodeBytes = sizeof(int64_t) + sizeof(int) + 2 * sizeof(std::pair<int64_t, int>);
+    const std::size_t perNodeBytes = sizeof(int64_t) + 2 * sizeof(int) + 2 * sizeof(std::tuple<int64_t, int64_t, int>);
     if (nodeCount > std::numeric_limits<std::size_t>::max() / perNodeBytes) {
         throw std::overflow_error("CPU maze worker scratch size overflow");
     }
@@ -505,9 +569,21 @@ CpuMazeBatchResult CpuMazeRouter::routeBatch(const std::vector<CpuMazeNet>& nets
     }
 
     CpuRouteWorkerPool workerPool(result.effectiveWorkers);
-    workerPool.run(nets.size(), [&](int, std::size_t index) {
-        result.results[index] = route(nets[index], view);
+    std::vector<CpuMazeSearchScratch> scratches(static_cast<std::size_t>(result.effectiveWorkers));
+    std::atomic<int> active{0}, maxActive{0};
+    std::vector<double> searchSeconds(nets.size(), 0.0);
+    workerPool.run(nets.size(), [&](int worker, std::size_t index) {
+        const int count = active.fetch_add(1) + 1;
+        int maximum = maxActive.load();
+        while (count > maximum && !maxActive.compare_exchange_weak(maximum, count)) {}
+        const auto started = std::chrono::steady_clock::now();
+        result.results[index] = route(nets[index], view, scratches[static_cast<std::size_t>(worker)]);
+        searchSeconds[index] = std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - started).count();
+        active.fetch_sub(1);
     });
+    result.maxActiveSearches = maxActive.load();
+    for (double seconds : searchSeconds) result.workerSearchSeconds += seconds;
     return result;
 }
 

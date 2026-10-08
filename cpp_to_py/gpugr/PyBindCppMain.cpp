@@ -1027,7 +1027,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         .def("routing_layer_range", &gr::GRDatabase::routingLayerRange)
         .def("routing_layer_names", &gr::GRDatabase::routingLayerNames);
     pybind11::class_<gr::RouteForce, std::shared_ptr<gr::RouteForce>>(m, "RouteForce")
-        .def(pybind11::init<std::shared_ptr<gr::GRDatabase>>())
+        .def(pybind11::init<std::shared_ptr<gr::GRDatabase>>(), py::keep_alive<1, 2>())
         .def("run_ggr", &gr::RouteForce::run_ggr)
         .def("run_stats", [](const gr::RouteForce& routeforce) {
             const auto stats = routeforce.getRunStats();
@@ -1061,7 +1061,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
             result["conflict_fallback_count"] = stats.conflictFallbackCount;
             result["peak_memory_bytes"] = stats.peakMemoryBytes;
             pybind11::list rrrIterations;
-            for (const auto& iteration : stats.rrrIterations) {
+            auto iterationStats = [](const auto& iteration) {
                 pybind11::dict item;
                 item["iteration"] = iteration.iteration;
                 item["selected_net_count"] = iteration.selectedNetCount;
@@ -1082,11 +1082,21 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
                 item["parallel_batch_count"] = iteration.parallelBatchCount;
                 item["conflict_fallback_count"] = iteration.conflictFallbackCount;
                 item["search_seconds"] = iteration.searchSeconds;
+                item["fallback_search_seconds"] = iteration.fallbackSearchSeconds;
+                item["max_active_searches"] = iteration.maxActiveSearches;
+                item["worker_search_seconds"] = iteration.workerSearchSeconds;
                 item["cost_rebuild_seconds"] = iteration.costRebuildSeconds;
                 item["commit_seconds"] = iteration.commitSeconds;
                 item["rollback_seconds"] = iteration.rollbackSeconds;
                 item["total_seconds"] = iteration.totalSeconds;
-                rrrIterations.append(item);
+                return item;
+            };
+            if (stats.hasRouteQor) {
+                result["initial_route_qor"] = iterationStats(stats.initialRouteQor);
+                result["accepted_route_qor"] = iterationStats(stats.acceptedRouteQor);
+            }
+            for (const auto& iteration : stats.rrrIterations) {
+                rrrIterations.append(iterationStats(iteration));
             }
             result["rrr_iterations"] = rrrIterations;
             result["cost_map_seconds"] = stats.costMapSeconds;
@@ -1205,7 +1215,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         std::shared_ptr<gr::RouteForce> routeforce = std::make_shared<gr::RouteForce>(grdb);
         logger.reset_logger();
         return routeforce;
-    });
+    }, py::keep_alive<0, 1>());
     m.def("load_gr_params", &loadGRParams, "Parse input args to DB and return graph information");
     m.def("cuda_enabled", []() { return static_cast<bool>(ENABLE_CUDA); });
     m.def("resolved_backend", []() { return gr::ggrBackendName(gr::grSetting.resolvedBackend); });
