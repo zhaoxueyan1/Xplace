@@ -1486,7 +1486,7 @@ void CPURouter::routeMazeRrr(std::vector<GrNet>& nets, int rrrIters, int request
     }
 
     const OverflowReport finalReport = makeReport();
-    if (metric(finalReport) != bestMetric) {
+    if (metric(finalReport) != bestMetric || finalReport.routeHash64 != bestReport.routeHash64) {
         routeState.restoreCheckpoint(checkpoint);
         for (int netId = 0; netId < static_cast<int>(nets.size()); ++netId) {
             setNetRouteFromRaw(nets[netId], routeState.rawRoutes()[netId]);
