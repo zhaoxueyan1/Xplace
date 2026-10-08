@@ -83,15 +83,18 @@ void validateView(const CpuMazeSearchView& view) {
     }
 }
 
+int coordinateOffset(const GridShape& shape, int layer, int x, int y) {
+    const bool contiguousY = ((layer & 1) ^ shape.direction) != 0;
+    return contiguousY ? x * shape.ySize + y : y * shape.xSize + x;
+}
+
 int encode(const GridShape& shape, const CpuMazePoint& point) {
     if (point.layer < 0 || point.layer >= shape.layerCount || point.x < 0 || point.x >= shape.xSize ||
         point.y < 0 || point.y >= shape.ySize) {
         return -1;
     }
-    const bool contiguousY = ((point.layer & 1) ^ shape.direction) != 0;
-    const int mappedX = contiguousY ? point.x : point.y;
-    const int mappedY = contiguousY ? point.y : point.x;
-    return point.layer * static_cast<int>(shape.stride) + mappedX * shape.ySize + mappedY;
+    return point.layer * static_cast<int>(shape.stride) +
+           coordinateOffset(shape, point.layer, point.x, point.y);
 }
 
 CpuMazePoint decode(const GridShape& shape, int encoded) {
@@ -99,10 +102,11 @@ CpuMazePoint decode(const GridShape& shape, int encoded) {
         return {};
     }
     const int layer = encoded / static_cast<int>(shape.stride);
-    const int offset = encoded % static_cast<int>(shape.stride);
-    const int mappedX = offset / shape.ySize;
-    const int mappedY = offset % shape.ySize;
     const bool contiguousY = ((layer & 1) ^ shape.direction) != 0;
+    const int axisSize = contiguousY ? shape.ySize : shape.xSize;
+    const int offset = encoded % static_cast<int>(shape.stride);
+    const int mappedX = offset / axisSize;
+    const int mappedY = offset % axisSize;
     if (contiguousY) {
         return {layer, mappedX, mappedY};
     }
@@ -201,8 +205,7 @@ void forEachNeighbour(const CpuMazeSearchView& view,
         }
         const int lowerLayer = std::min(point.layer, nextLayer);
         const int via = lowerLayer * static_cast<int>(shape.stride) +
-                        (((lowerLayer & 1) ^ view.direction) ? point.x * shape.ySize + point.y
-                                                              : point.y * shape.ySize + point.x);
+                        coordinateOffset(shape, lowerLayer, point.x, point.y);
         const int64_t cost = viaStepCost(view, via);
         if (cost < INF_DISTANCE) {
             visitor(encode(shape, {nextLayer, point.x, point.y}), cost, via, true);
@@ -302,10 +305,9 @@ void appendPath(CpuRouteCandidate& candidate,
         const CpuMazePoint fromPoint = decode(shape, from);
         const CpuMazePoint toPoint = decode(shape, to);
         if (fromPoint.layer != toPoint.layer) {
-            const int via = std::min(fromPoint.layer, toPoint.layer) * static_cast<int>(shape.stride) +
-                            (((std::min(fromPoint.layer, toPoint.layer) & 1) ^ shape.direction)
-                                 ? fromPoint.x * shape.ySize + fromPoint.y
-                                 : fromPoint.y * shape.ySize + fromPoint.x);
+            const int lowerLayer = std::min(fromPoint.layer, toPoint.layer);
+            const int via = lowerLayer * static_cast<int>(shape.stride) +
+                            coordinateOffset(shape, lowerLayer, fromPoint.x, fromPoint.y);
             if (std::find(candidate.viaDeltas.begin(), candidate.viaDeltas.end(), via) ==
                 candidate.viaDeltas.end()) {
                 candidate.rawRoute.push_back(via);
@@ -320,8 +322,7 @@ void appendPath(CpuRouteCandidate& candidate,
 }
 
 int viaIndex(const GridShape& shape, int lowerLayer, int x, int y) {
-    return lowerLayer * static_cast<int>(shape.stride) +
-           (((lowerLayer & 1) ^ shape.direction) ? x * shape.ySize + y : y * shape.ySize + x);
+    return lowerLayer * static_cast<int>(shape.stride) + coordinateOffset(shape, lowerLayer, x, y);
 }
 
 bool appendViaIfMissing(CpuRouteCandidate& candidate, int via) {

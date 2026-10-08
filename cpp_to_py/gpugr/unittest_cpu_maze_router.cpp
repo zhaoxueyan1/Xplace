@@ -37,7 +37,11 @@ gr::CpuMazeSearchView makeView(int layers,
     return view;
 }
 
-void assertValidRoute(const gr::CpuRouteCandidate& candidate, int layers, int width, int height) {
+void assertValidRoute(const gr::CpuRouteCandidate& candidate,
+                      int layers,
+                      int width,
+                      int height,
+                      int direction = 0) {
     assert(candidate.status == gr::CpuRouteStatus::Routed);
     assert(candidate.rawRoute[0] == static_cast<int>(candidate.rawRoute.size()));
     for (std::size_t index = 1; index + 1 < candidate.rawRoute.size(); index += 2) {
@@ -48,8 +52,19 @@ void assertValidRoute(const gr::CpuRouteCandidate& candidate, int layers, int wi
             assert(point < (layers - 1) * width * height);
         } else {
             assert(span > 0);
-            assert(point / (width * height) == (point + span - 1) / (width * height));
             assert(point + span <= layers * width * height);
+            const int layer = point / (width * height);
+            const int offset = point % (width * height);
+            const bool contiguousY = ((layer & 1) ^ direction) != 0;
+            const int axisSize = contiguousY ? height : width;
+            const int mappedX = offset / axisSize;
+            const int mappedY = offset % axisSize;
+            assert(mappedX >= 0 && mappedX < (contiguousY ? width : height));
+            if (contiguousY) {
+                assert(mappedY + span < height);
+            } else {
+                assert(mappedY + span < width);
+            }
         }
     }
 }
@@ -121,22 +136,52 @@ int main() {
     assert(transposedResult.succeeded());
     const std::vector<std::pair<int, int>> transposedWires{{0, 2}};
     assert(transposedResult.candidate.wireDeltas == transposedWires);
+    assertValidRoute(transposedResult.candidate, layers, width, height, 1);
+
+    std::vector<int> rectangularWireUsage(2 * 3 * 5, 0);
+    std::vector<int> rectangularViaUsage(2 * 3 * 5, 0);
+    std::vector<int> rectangularWireCost(2 * 3 * 5, 1);
+    std::vector<int> rectangularViaCost(2 * 3 * 5, 1);
+    std::vector<float> rectangularCapacity(2 * 3 * 5, 10.0f);
+    std::vector<float> rectangularFixedUsage(2 * 3 * 5, 0.0f);
+    std::vector<uint8_t> rectangularBlockedWire(2 * 3 * 5, 0);
+    std::vector<uint8_t> rectangularBlockedVia(2 * 3 * 5, 0);
+    const auto rectangularView = makeView(2,
+                                          3,
+                                          5,
+                                          rectangularWireUsage,
+                                          rectangularViaUsage,
+                                          rectangularWireCost,
+                                          rectangularViaCost,
+                                          rectangularCapacity,
+                                          rectangularFixedUsage,
+                                          rectangularBlockedWire,
+                                          rectangularBlockedVia);
+    gr::CpuMazeNet rectangularNet{5, {{{0, 0, 0}}, {{0, 2, 0}}}};
+    const auto rectangularResult = router.route(rectangularNet, rectangularView);
+    assert(rectangularResult.succeeded());
+    assert(rectangularResult.candidate.rawRoute == directRawRoute);
+    assertValidRoute(rectangularResult.candidate, 2, 3, 5);
 
     const std::vector<gr::CpuMazeNet> batchNets{direct, viaNet, accessNet};
     const auto serialBatch = router.routeBatch(batchNets, view, 1);
-    const auto parallelBatch = router.routeBatch(batchNets, view, 2);
     assert(serialBatch.results.size() == batchNets.size());
-    assert(parallelBatch.results.size() == batchNets.size());
     assert(serialBatch.effectiveWorkers == 1);
-    assert(parallelBatch.effectiveWorkers >= 1 && parallelBatch.effectiveWorkers <= 2);
-    for (std::size_t index = 0; index < batchNets.size(); ++index) {
-        assert(serialBatch.results[index].candidate.rawRoute ==
-               parallelBatch.results[index].candidate.rawRoute);
-        assert(serialBatch.results[index].candidate.wireDeltas ==
-               parallelBatch.results[index].candidate.wireDeltas);
-        assert(serialBatch.results[index].candidate.viaDeltas ==
-               parallelBatch.results[index].candidate.viaDeltas);
-        assert(serialBatch.results[index].failureReason == parallelBatch.results[index].failureReason);
+    for (int requestedWorkers : {2, 4, 8}) {
+        const auto parallelBatch = router.routeBatch(batchNets, view, requestedWorkers);
+        assert(parallelBatch.results.size() == batchNets.size());
+        assert(parallelBatch.effectiveWorkers >= 1 &&
+               parallelBatch.effectiveWorkers <= requestedWorkers);
+        for (std::size_t index = 0; index < batchNets.size(); ++index) {
+            assert(serialBatch.results[index].candidate.rawRoute ==
+                   parallelBatch.results[index].candidate.rawRoute);
+            assert(serialBatch.results[index].candidate.wireDeltas ==
+                   parallelBatch.results[index].candidate.wireDeltas);
+            assert(serialBatch.results[index].candidate.viaDeltas ==
+                   parallelBatch.results[index].candidate.viaDeltas);
+            assert(serialBatch.results[index].failureReason ==
+                   parallelBatch.results[index].failureReason);
+        }
     }
 
     std::fill(blockedWire.begin(), blockedWire.end(), 0);
