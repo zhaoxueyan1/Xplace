@@ -233,5 +233,9 @@ int main() {
     assert(steinerRoute.candidate.rawRoute == directRawRoute);
     steiner.branches.pop_back();
     assert(router.route(steiner, view).failureReason == gr::CpuMazeFailureReason::Unreachable);
+
+    auto oversized = view;
+    oversized.xSize = oversized.ySize = 50000;
+    assert(router.route(direct, oversized).failureReason == gr::CpuMazeFailureReason::RouteBuffer);
     return 0;
 }

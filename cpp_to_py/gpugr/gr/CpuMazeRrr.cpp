@@ -376,8 +376,8 @@ void CPURouter::routeMazeRrr(std::vector<GrNet>& nets, int rrrIters, int request
             iteration.bestState = true;
         }
         runStats.rrrIterations.push_back(iteration);
-        logger.info("CPU maze commit iteration=%d rerouted=%d failed=%d fallback=%d fallback_seconds=%.4f best=%d",
-                    iter, rerouted, failed, conflictFallbacks, fallbackSearchSeconds, iteration.bestState);
+        logger.info("CPU maze commit iteration=%d rerouted=%d fallback=%d fallback_seconds=%.4f best=%d",
+                    iter, rerouted, conflictFallbacks, fallbackSearchSeconds, iteration.bestState);
         if (!iteration.bestState) {
             break;
         }

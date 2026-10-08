@@ -44,7 +44,11 @@ std::size_t checkedGridSize(const CpuMazeSearchView& view) {
         layerCount * xSize > std::numeric_limits<std::size_t>::max() / ySize) {
         throw std::overflow_error("CPU maze grid size overflow");
     }
-    return layerCount * xSize * ySize;
+    const std::size_t nodeCount = layerCount * xSize * ySize;
+    if (nodeCount > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+        throw std::overflow_error("CPU maze encoded grid index exceeds INT_MAX");
+    }
+    return nodeCount;
 }
 
 GridShape shapeOf(const CpuMazeSearchView& view) {
