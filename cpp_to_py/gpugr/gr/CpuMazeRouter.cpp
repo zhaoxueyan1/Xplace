@@ -317,7 +317,15 @@ void appendPath(CpuRouteCandidate& candidate,
             continue;
         }
         const int start = std::min(from, to);
-        appendWireDelta(candidate, start, std::abs(to - from), fromPoint.layer, shape.stride);
+        const bool alreadyPresent = std::any_of(
+            candidate.wireDeltas.begin(),
+            candidate.wireDeltas.end(),
+            [start](const std::pair<int, int>& delta) {
+                return start >= delta.first && start < delta.first + delta.second;
+            });
+        if (!alreadyPresent) {
+            appendWireDelta(candidate, start, std::abs(to - from), fromPoint.layer, shape.stride);
+        }
     }
 }
 
