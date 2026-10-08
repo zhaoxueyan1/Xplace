@@ -163,6 +163,13 @@ int main() {
     assert(rectangularResult.candidate.rawRoute == directRawRoute);
     assertValidRoute(rectangularResult.candidate, 2, 3, 5);
 
+    gr::CpuMazeSearchView singleLayerView = view;
+    singleLayerView.routingLayerEnd = 0;
+    gr::CpuMazeNet layerLimited{6, {{{0, 0, 0}}, {{0, 0, 2}}}};
+    const auto layerLimitedResult = router.route(layerLimited, singleLayerView);
+    assert(!layerLimitedResult.succeeded());
+    assert(layerLimitedResult.failureReason == gr::CpuMazeFailureReason::Unreachable);
+
     const std::vector<gr::CpuMazeNet> batchNets{direct, viaNet, accessNet};
     const auto serialBatch = router.routeBatch(batchNets, view, 1);
     assert(serialBatch.results.size() == batchNets.size());
