@@ -4,6 +4,7 @@
 #include "gpugr/db/GRDatabase.h"
 #include "gpugr/db/GrNet.h"
 #include "gpugr/gr/CpuRouteBatchScheduler.h"
+#include "gpugr/gr/CpuRouteState.h"
 #include "gpugr/gr/CpuRouteTypes.h"
 #include <torch/extension.h>
 #include <tuple>
@@ -31,7 +32,7 @@ public:
     torch::Tensor getFixUsageMap();
     torch::Tensor getMovUsageMap();
     int getNumOvflNets() const { return numOvflNets; }
-    std::vector<std::vector<int>> getRawRoutes() const { return rawRoutes; }
+    std::vector<std::vector<int>> getRawRoutes() const { return routeState.rawRoutes(); }
     const CpuRouteRunStats& getRunStats() const { return runStats; }
 
 private:
@@ -91,8 +92,6 @@ private:
     std::vector<float> fixed;
     std::vector<float> fixUsage;
     std::vector<float> movUsage;
-    std::vector<int> wires;
-    std::vector<int> vias;
     std::vector<int> cost;
     std::vector<int> viaCostMap;
     std::vector<int64_t> costSum;
@@ -103,7 +102,7 @@ private:
     float unitViaMultiplier = 1.0f;
     float logisticSlope = 1.0f;
     int numOvflNets = 0;
-    std::vector<std::vector<int>> rawRoutes;
+    CpuRouteState routeState;
     CpuRouteRunStats runStats;
     std::string diagnosticBackend = "cpu_pr";
 };

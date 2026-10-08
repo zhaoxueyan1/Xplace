@@ -88,14 +88,13 @@ void CPURouter::initialize(const gr::GRDatabase& grdb, const std::string& backen
     routingLayerBegin = grdb.routingLayerBegin;
     routingLayerEnd = grdb.routingLayerEnd;
     const int gridGraphSize = LAYER * N * N;
-    wires.assign(gridGraphSize, 0);
-    vias.assign(gridGraphSize, 0);
+    routeState.resetResources(static_cast<std::size_t>(gridGraphSize));
     cost.assign(gridGraphSize, INF);
     viaCostMap.assign(gridGraphSize, 0);
     costSum.assign(gridGraphSize, 0);
     overflowWire.assign(gridGraphSize, 0);
     overflowVia.assign(gridGraphSize, 0);
-    rawRoutes.clear();
+    routeState.resetRoutes(0);
     numOvflNets = 0;
 
     double unitWireCostRaw = 0.5 * grdb.microns / grdb.m2pitch;
@@ -163,10 +162,10 @@ float CPURouter::inCellViaUsage(int encoded) const {
     int x = encoded % N;
     float usage = 0.0f;
     if (layer + 2 < LAYER) {
-        usage += static_cast<float>(vias[encoded]);
+        usage += static_cast<float>(routeState.vias()[encoded]);
     }
     if (layer >= 0) {
-        usage += static_cast<float>(vias[layer * N * N + x * N + y]);
+        usage += static_cast<float>(routeState.vias()[layer * N * N + x * N + y]);
     }
     return usage;
 }
@@ -178,10 +177,10 @@ float CPURouter::twoCellsViaUsage(int encoded) const {
 float CPURouter::inCellUsedArea(int encoded) const {
     float used = 0.0f;
     if (encoded % N > 0) {
-        used += fixed[encoded - 1] + static_cast<float>(wires[encoded - 1]);
+        used += fixed[encoded - 1] + static_cast<float>(routeState.wires()[encoded - 1]);
     }
     if (encoded % N + 1 < N) {
-        used += fixed[encoded] + static_cast<float>(wires[encoded]);
+        used += fixed[encoded] + static_cast<float>(routeState.wires()[encoded]);
     }
     return used / 2.0f;
 }
@@ -210,9 +209,9 @@ int CPURouter::calcWireCost(int encoded) const {
         return INF;
     }
     int expectedLen = static_cast<int>(
-        (fixed[encoded] * fixedLength[encoded] + static_cast<float>(wires[encoded]) * wireDist[encoded]) /
+        (fixed[encoded] * fixedLength[encoded] + static_cast<float>(routeState.wires()[encoded]) * wireDist[encoded]) /
         capacity[encoded]);
-    float remain = capacity[encoded] - (fixed[encoded] + static_cast<float>(wires[encoded]) + 1.0f +
+    float remain = capacity[encoded] - (fixed[encoded] + static_cast<float>(routeState.wires()[encoded]) + 1.0f +
                                         twoCellsViaUsage(encoded));
     float result =
         wireDist[encoded] +
@@ -770,27 +769,12 @@ void CPURouter::setNetRouteFromRaw(GrNet& net, const std::vector<int>& rawRoute)
 }
 
 void CPURouter::commitCandidate(GrNet& net, const CpuRouteCandidate& candidate) {
-    if (candidate.netId < 0 || candidate.netId >= static_cast<int>(rawRoutes.size())) {
+    try {
+        routeState.commit(candidate);
+    } catch (const std::exception& error) {
         throw std::runtime_error("backend=" + diagnosticBackend +
-                                 " operation=commit candidate net id outside route table");
+                                 " operation=commit: " + error.what());
     }
-    for (const auto& [start, span] : candidate.wireDeltas) {
-        if (start < 0 || span <= 0 || start > static_cast<int>(wires.size()) - span) {
-            throw std::runtime_error("backend=" + diagnosticBackend +
-                                     " operation=commit wire delta outside route grid");
-        }
-        for (int offset = 0; offset < span; ++offset) {
-            ++wires[start + offset];
-        }
-    }
-    for (int encoded : candidate.viaDeltas) {
-        if (encoded < 0 || encoded >= static_cast<int>(vias.size())) {
-            throw std::runtime_error("backend=" + diagnosticBackend +
-                                     " operation=commit via delta outside route grid");
-        }
-        ++vias[encoded];
-    }
-    rawRoutes[candidate.netId] = candidate.rawRoute;
     setNetRouteFromRaw(net, candidate.rawRoute);
 }
 
@@ -815,7 +799,8 @@ bool CPURouter::batchHasResourceConflict(
                    y >= net.lowery && y <= net.uppery;
         };
         for (const auto& [start, span] : candidate.wireDeltas) {
-            if (start < 0 || span <= 0 || start > static_cast<int>(wires.size()) - span ||
+            if (start < 0 || span <= 0 ||
+                start > static_cast<int>(routeState.wires().size()) - span ||
                 !inNetBox(start) || !inNetBox(start + span)) {
                 return true;
             }
@@ -827,7 +812,8 @@ bool CPURouter::batchHasResourceConflict(
             }
         }
         for (int encoded : candidate.viaDeltas) {
-            if (encoded < 0 || encoded >= static_cast<int>(vias.size()) || !inNetBox(encoded)) {
+            if (encoded < 0 || encoded >= static_cast<int>(routeState.vias().size()) ||
+                !inNetBox(encoded)) {
                 return true;
             }
             const uint64_t key = (static_cast<uint64_t>(encoded) << 1) | uint64_t{1};
@@ -844,7 +830,8 @@ void CPURouter::markOverflowNets(const std::vector<GrNet>& nets) {
     std::fill(overflowVia.begin(), overflowVia.end(), 0);
     for (int idx = 0; idx < LAYER * N * N; ++idx) {
         if (idx % N + 1 < N) {
-            overflowWire[idx] = (static_cast<float>(wires[idx]) + fixed[idx] + twoCellsViaUsage(idx) > capacity[idx]);
+            overflowWire[idx] = (static_cast<float>(routeState.wires()[idx]) + fixed[idx] +
+                                 twoCellsViaUsage(idx) > capacity[idx]);
         }
     }
     for (int idx = 0; idx < (LAYER - 1) * N * N; ++idx) {
@@ -856,7 +843,7 @@ void CPURouter::markOverflowNets(const std::vector<GrNet>& nets) {
     }
     numOvflNets = 0;
     for (int netId = 0; netId < static_cast<int>(nets.size()); ++netId) {
-        const auto& rawRoute = rawRoutes[netId];
+        const auto& rawRoute = routeState.rawRoutes()[netId];
         if (rawRoute.empty() || rawRoute[0] < 0) {
             ++numOvflNets;
             continue;
@@ -885,8 +872,7 @@ void CPURouter::route(std::vector<GrNet>& nets) {
     const auto totalStart = SteadyClock::now();
     runStats = CpuRouteRunStats{};
     runStats.terminalStatus = "running";
-    rawRoutes.clear();
-    rawRoutes.resize(nets.size());
+    routeState.resetRoutes(nets.size());
     std::vector<int> pinNum(nets.size(), 0);
     std::vector<int> routeOffsets(nets.size() + 1, 0);
     for (int netId = 0; netId < static_cast<int>(nets.size()); ++netId) {
@@ -964,7 +950,7 @@ void CPURouter::route(std::vector<GrNet>& nets) {
 
     for (int netId = 0; netId < static_cast<int>(nets.size()); ++netId) {
         if (nets[netId].noroute || nets[netId].getPins().size() < 2) {
-            rawRoutes[netId] = {0};
+            routeState.setInactiveRoute(netId);
             nets[netId].setWires({});
             nets[netId].setVias({});
         }
@@ -972,9 +958,9 @@ void CPURouter::route(std::vector<GrNet>& nets) {
     const auto overflowStart = SteadyClock::now();
     markOverflowNets(nets);
     runStats.overflowMarkSeconds = elapsedSeconds(overflowStart);
-    runStats.routeHash64 = hashRawRoutes(rawRoutes);
-    runStats.wireMapHash64 = hashIntVector(wires);
-    runStats.viaMapHash64 = hashIntVector(vias);
+    runStats.routeHash64 = hashRawRoutes(routeState.rawRoutes());
+    runStats.wireMapHash64 = hashIntVector(routeState.wires());
+    runStats.viaMapHash64 = hashIntVector(routeState.vias());
     runStats.totalSeconds = elapsedSeconds(totalStart);
     runStats.terminalStatus = "completed";
 }
@@ -985,7 +971,7 @@ void CPURouter::routeParallel(std::vector<GrNet>& nets, int requestedWorkers) {
     runStats.requestedWorkers = requestedWorkers;
     runStats.workerClampReason = "none";
     runStats.terminalStatus = "running";
-    rawRoutes.assign(nets.size(), {});
+    routeState.resetRoutes(nets.size());
 
     std::vector<int> pinNum(nets.size(), 0);
     for (int netId = 0; netId < static_cast<int>(nets.size()); ++netId) {
@@ -1175,7 +1161,7 @@ void CPURouter::routeParallel(std::vector<GrNet>& nets, int requestedWorkers) {
 
     for (int netId = 0; netId < static_cast<int>(nets.size()); ++netId) {
         if (nets[netId].noroute || nets[netId].getPins().size() < 2) {
-            rawRoutes[netId] = {0};
+            routeState.setInactiveRoute(netId);
             nets[netId].setWires({});
             nets[netId].setVias({});
         }
@@ -1183,9 +1169,9 @@ void CPURouter::routeParallel(std::vector<GrNet>& nets, int requestedWorkers) {
     const auto overflowStart = SteadyClock::now();
     markOverflowNets(nets);
     runStats.overflowMarkSeconds = elapsedSeconds(overflowStart);
-    runStats.routeHash64 = hashRawRoutes(rawRoutes);
-    runStats.wireMapHash64 = hashIntVector(wires);
-    runStats.viaMapHash64 = hashIntVector(vias);
+    runStats.routeHash64 = hashRawRoutes(routeState.rawRoutes());
+    runStats.wireMapHash64 = hashIntVector(routeState.wires());
+    runStats.viaMapHash64 = hashIntVector(routeState.vias());
     runStats.totalSeconds = elapsedSeconds(totalStart);
     runStats.terminalStatus = "completed";
 }
@@ -1236,7 +1222,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> CPURouter::getDemandMap(
                 if (encoded % N + 1 >= N) {
                     continue;
                 }
-                float wireDemand = static_cast<float>(wires[encoded]) + fixed[encoded];
+                float wireDemand = static_cast<float>(routeState.wires()[encoded]) + fixed[encoded];
                 float viaDemand = twoCellsViaUsage(encoded);
                 wire[layer][x][y] = wireDemand;
                 via[layer][x][y] = viaDemand;
@@ -1249,7 +1235,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> CPURouter::getDemandMap(
 
 torch::Tensor CPURouter::getCapacityMap() { return buildGridTensor(capacity); }
 
-torch::Tensor CPURouter::getRawWireDemandMap() { return buildGridTensor(wires); }
+torch::Tensor CPURouter::getRawWireDemandMap() { return buildGridTensor(routeState.wires()); }
 
 torch::Tensor CPURouter::getFixUsageMap() { return buildGridTensor(fixUsage); }
 
