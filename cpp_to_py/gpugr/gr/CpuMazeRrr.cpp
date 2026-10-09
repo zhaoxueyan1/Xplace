@@ -116,9 +116,8 @@ void CPURouter::routeMazeRrr(std::vector<GrNet>& nets, int rrrIters, int request
                                                  qor.overflowWireResourceCount + qor.overflowViaResourceCount,
                                                  qor.wireLength, qor.viaCount);
     };
-    OverflowReport bestReport = overflowReport;
     runStats.hasRouteQor = true;
-    runStats.initialRouteQor = bestReport.qor;
+    runStats.initialRouteQor = overflowReport.qor;
     runStats.acceptedRouteQor = runStats.initialRouteQor;
     if (rrrIters == 0) {
         runStats.totalSeconds = elapsedSeconds(totalStart);
@@ -143,8 +142,7 @@ void CPURouter::routeMazeRrr(std::vector<GrNet>& nets, int rrrIters, int request
             }
         }
     }
-    auto checkpoint = routeState.checkpoint();
-    auto bestMetric = metric(bestReport);
+    auto bestMetric = metric(overflowReport);
     CpuMazeRouter mazeRouter;
     CpuMazeSearchScratch fallbackScratch;
     runStats.mazeBatchSizeLimit = CPU_MAZE_BATCH_SIZE;
@@ -201,10 +199,9 @@ void CPURouter::routeMazeRrr(std::vector<GrNet>& nets, int rrrIters, int request
         CpuMazeBatchRouter batchRouter(guidedView(), requestedWorkers, CPU_MAZE_BATCH_SIZE);
         auto sharedBytes = [&]() {
             auto bytes = [](const auto& values) { return values.capacity() * sizeof(values.front()); };
-            // Include saved routes, best checkpoint, replacement checkpoint,
-            // full map restore buffers, changed-resource flags and fallback scratch.
-            return 2 * routeState.bytes() + cpuRouteSnapshotsBytes(oldRoutes) +
-                   cpuRouteSnapshotsBytes(checkpoint.routes) +
+            // Include current/saved routes, changed-resource flags, coarse
+            // search storage and the serial fallback scratch reservation.
+            return routeState.bytes() + cpuRouteSnapshotsBytes(oldRoutes) +
                    bytes(capacity) + bytes(wireDist) + bytes(fixedLength) + bytes(fixed) +
                    bytes(fixUsage) + bytes(movUsage) + bytes(cost) + bytes(viaCostMap) +
                    bytes(costSum) + bytes(overflowWire) + bytes(overflowVia) +
@@ -352,35 +349,25 @@ void CPURouter::routeMazeRrr(std::vector<GrNet>& nets, int rrrIters, int request
 
         if (metric(after) < bestMetric) {
             bestMetric = metric(after);
-            bestReport = after;
-            checkpoint = routeState.checkpoint();
             iteration.bestState = true;
         }
         runStats.rrrIterations.push_back(iteration);
+        runStats.acceptedRouteQor = iteration;
         logger.info("CPU maze commit iteration=%d rerouted=%d fallback=%d fallback_seconds=%.4f best=%d",
                     iter, rerouted, conflictFallbacks, fallbackSearchSeconds, iteration.bestState);
-        if (!iteration.bestState) {
-            break;
-        }
+        // Later passes use different congestion/via penalties. A non-improving
+        // intermediate pass must not skip the remaining cost schedule.
         if (after.netIds.empty()) {
             break;
         }
     }
 
-    const OverflowReport finalReport = overflowReport;
-    if (metric(finalReport) != bestMetric || finalReport.qor.routeHash64 != bestReport.qor.routeHash64) {
-        routeState.restoreCheckpoint(checkpoint);
-        for (int netId = 0; netId < static_cast<int>(nets.size()); ++netId) {
-            setNetRouteFromRaw(nets[netId], routeState.rawRoute(netId));
-        }
-        calculateCostMaps();
-        markOverflowNets(nets);
-        runStats.bestStateRestored = true;
-    }
+    // GR parasitic evaluation uses the completed route, as the CUDA backend
+    // does. bestState is diagnostic only; intermediate overflow minima do not
+    // replace the result of the scheduled final congestion/via penalties.
     runStats.routeHash64 = hashRawRoutes(routeState.routes());
     runStats.wireMapHash64 = hashIntVector(routeState.wires());
     runStats.viaMapHash64 = hashIntVector(routeState.vias());
-    runStats.acceptedRouteQor = bestReport.qor;
     runStats.totalSeconds = elapsedSeconds(totalStart);
     runStats.terminalStatus = "completed";
 }
