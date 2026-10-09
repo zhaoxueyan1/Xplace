@@ -72,6 +72,12 @@ private:
                                   std::size_t begin,
                                   std::size_t end) const;
     void setNetRouteFromRaw(GrNet& net, const std::vector<int>& rawRoute) const;
+    struct OverflowReport {
+        std::vector<int> netIds;
+        CpuRouteRunStats::RrrIteration qor;
+        int legacyOverflowNetCount = 0;
+    };
+    OverflowReport overflowReport;
     void markOverflowNets(const std::vector<GrNet>& nets);
     CpuMazeSearchView mazeSearchView() const;
     CpuMazeNet mazeNet(GrNet& net, int netId) const;
@@ -101,6 +107,8 @@ private:
     std::vector<int64_t> costSum;
     std::vector<int> overflowWire;
     std::vector<int> overflowVia;
+    std::vector<uint8_t> mazeBlockedWire;
+    std::vector<uint8_t> mazeBlockedVia;
     std::vector<double> unitShortCost;
     std::vector<float> unitShortCostDiscounted;
     float unitViaCost = 4.0f;

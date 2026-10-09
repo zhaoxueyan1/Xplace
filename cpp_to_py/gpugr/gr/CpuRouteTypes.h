@@ -10,7 +10,9 @@
 namespace gr {
 
 uint64_t hashIntVector(const std::vector<int>& values);
+struct CpuRouteSnapshot;
 uint64_t hashRawRoutes(const std::vector<std::vector<int>>& routes);
+uint64_t hashRawRoutes(const std::vector<CpuRouteSnapshot>& routes);
 
 struct CpuRouteScratch {
     std::vector<int64_t> map;
@@ -70,7 +72,11 @@ struct CpuRouteRunStats {
     bool bestStateRestored = false;
     int mazeRouteFailureCount = 0;
     int conflictFallbackCount = 0;
+    // Conservative reservation for router-owned storage, not process RSS.
     std::size_t peakMemoryBytes = 0;
+    std::string memoryAccounting = "not_recorded";
+    int mazeBatchSizeLimit = 0;
+    int mazeMaxBatchSize = 0;
     std::map<std::string, int> mazeFailureReasons;
     struct RrrIteration {
         int iteration = 0;
@@ -85,6 +91,8 @@ struct CpuRouteRunStats {
         int wireLength = 0;
         int viaCount = 0;
         int routedNetCount = 0;
+        int failedRouteCount = 0;
+        int unroutedNetCount = 0;
         uint64_t routeHash64 = 0;
         uint64_t wireMapHash64 = 0;
         uint64_t viaMapHash64 = 0;

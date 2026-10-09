@@ -25,8 +25,6 @@ void CpuRouteState::resetResources(std::size_t resourceCount) {
 }
 
 void CpuRouteState::resetRoutes(std::size_t netCount) {
-    rawRoutes_.clear();
-    rawRoutes_.resize(netCount);
     routeSnapshots_.assign(netCount, CpuRouteSnapshot{});
 }
 
@@ -38,7 +36,9 @@ void CpuRouteState::validateNetId(int netId) const {
 
 void CpuRouteState::validateSnapshot(const CpuRouteSnapshot& snapshot) const {
     if (!snapshot.active) {
-        if (!snapshot.wireDeltas.empty() || !snapshot.viaDeltas.empty()) {
+        if (!snapshot.wireDeltas.empty() || !snapshot.viaDeltas.empty() ||
+            snapshot.rawRoute.size() > 1 ||
+            (!snapshot.rawRoute.empty() && snapshot.rawRoute[0] > 1)) {
             throw std::runtime_error("CPU route state inactive route has resource deltas");
         }
     } else {
@@ -112,8 +112,10 @@ void CpuRouteState::setInactiveRoute(int netId, std::vector<int> rawRoute) {
     if (routeSnapshots_[static_cast<std::size_t>(netId)].active) {
         throw std::runtime_error("CPU route state cannot replace an active route");
     }
-    routeSnapshots_[static_cast<std::size_t>(netId)] = CpuRouteSnapshot{};
-    rawRoutes_[static_cast<std::size_t>(netId)] = std::move(rawRoute);
+    CpuRouteSnapshot snapshot;
+    snapshot.rawRoute = std::move(rawRoute);
+    validateSnapshot(snapshot);
+    routeSnapshots_[static_cast<std::size_t>(netId)] = std::move(snapshot);
 }
 
 void CpuRouteState::commit(const CpuRouteCandidate& candidate) {
@@ -129,20 +131,22 @@ void CpuRouteState::commit(const CpuRouteCandidate& candidate) {
     snapshot.viaDeltas = candidate.viaDeltas;
     validateSnapshot(snapshot);
     applyDeltas(snapshot, 1);
-    routeSnapshots_[netId] = snapshot;
-    rawRoutes_[netId] = snapshot.rawRoute;
+    routeSnapshots_[netId] = std::move(snapshot);
 }
 
 CpuRouteSnapshot CpuRouteState::remove(int netId) {
     validateNetId(netId);
     const std::size_t index = static_cast<std::size_t>(netId);
-    CpuRouteSnapshot old = routeSnapshots_[index];
-    if (!old.active) {
+    // Validate and subtract before moving the canonical route out of the table.
+    const auto& current = routeSnapshots_[index];
+    if (!current.active) {
         throw std::runtime_error("CPU route state cannot remove an inactive route");
     }
-    applyDeltas(old, -1);
-    routeSnapshots_[index] = CpuRouteSnapshot{};
-    rawRoutes_[index] = {1};
+    CpuRouteSnapshot inactive;
+    inactive.rawRoute = {1};
+    applyDeltas(current, -1);
+    CpuRouteSnapshot old = std::move(routeSnapshots_[index]);
+    routeSnapshots_[index] = std::move(inactive);
     return old;
 }
 
@@ -152,10 +156,10 @@ void CpuRouteState::restore(int netId, const CpuRouteSnapshot& snapshot) {
     if (routeSnapshots_[index].active) {
         throw std::runtime_error("CPU route state cannot restore over an active route");
     }
-    validateSnapshot(snapshot);
-    applyDeltas(snapshot, 1);
-    routeSnapshots_[index] = snapshot;
-    rawRoutes_[index] = snapshot.rawRoute;
+    auto replacement = snapshot;
+    validateSnapshot(replacement);
+    applyDeltas(replacement, 1);
+    routeSnapshots_[index] = std::move(replacement);
 }
 
 CpuRouteSnapshot CpuRouteState::snapshot(int netId) const {
@@ -164,12 +168,11 @@ CpuRouteSnapshot CpuRouteState::snapshot(int netId) const {
 }
 
 CpuRouteCheckpoint CpuRouteState::checkpoint() const {
-    return {routeSnapshots_, rawRoutes_};
+    return {routeSnapshots_};
 }
 
 void CpuRouteState::restoreCheckpoint(const CpuRouteCheckpoint& checkpoint) {
-    if (checkpoint.routes.size() != checkpoint.rawRoutes.size() ||
-        checkpoint.routes.size() != routeSnapshots_.size()) {
+    if (checkpoint.routes.size() != routeSnapshots_.size()) {
         throw std::runtime_error("CPU route state checkpoint net count mismatch");
     }
     std::vector<int> rebuiltWires(wires_.size(), 0);
@@ -188,10 +191,38 @@ void CpuRouteState::restoreCheckpoint(const CpuRouteCheckpoint& checkpoint) {
             ++rebuiltVias[static_cast<std::size_t>(encoded)];
         }
     }
+    // Allocate the replacement route table before publishing any rebuilt map.
+    auto rebuiltRoutes = checkpoint.routes;
     wires_.swap(rebuiltWires);
     vias_.swap(rebuiltVias);
-    routeSnapshots_ = checkpoint.routes;
-    rawRoutes_ = checkpoint.rawRoutes;
+    routeSnapshots_.swap(rebuiltRoutes);
+}
+
+const std::vector<int>& CpuRouteState::rawRoute(int netId) const {
+    validateNetId(netId);
+    return routeSnapshots_[static_cast<std::size_t>(netId)].rawRoute;
+}
+
+std::vector<std::vector<int>> CpuRouteState::rawRoutes() const {
+    std::vector<std::vector<int>> result;
+    result.reserve(routeSnapshots_.size());
+    for (const auto& route : routeSnapshots_) result.push_back(route.rawRoute);
+    return result;
+}
+
+std::size_t cpuRouteSnapshotsBytes(const std::vector<CpuRouteSnapshot>& routes) {
+    std::size_t result = routes.capacity() * sizeof(CpuRouteSnapshot);
+    for (const auto& route : routes) {
+        result += route.rawRoute.capacity() * sizeof(int) +
+                  route.wireDeltas.capacity() * sizeof(std::pair<int, int>) +
+                  route.viaDeltas.capacity() * sizeof(int);
+    }
+    return result;
+}
+
+std::size_t CpuRouteState::bytes() const {
+    return (wires_.capacity() + vias_.capacity()) * sizeof(int) +
+           cpuRouteSnapshotsBytes(routeSnapshots_);
 }
 
 }  // namespace gr

@@ -1,12 +1,7 @@
 #include "CpuMazeRouter.h"
-#include "CpuRouteWorkerPool.h"
 
 #include <algorithm>
-#include <atomic>
-#include <chrono>
-#include <functional>
 #include <limits>
-#include <queue>
 #include <stdexcept>
 #include <tuple>
 #include <unordered_set>
@@ -88,9 +83,6 @@ void validateView(const CpuMazeSearchView& view) {
     if (view.overflowPenalty < 0) {
         throw std::invalid_argument("CPU maze overflow penalty must be non-negative");
     }
-    if (view.impassableCost <= 0) {
-        throw std::invalid_argument("CPU maze impassable cost must be positive");
-    }
     if (view.horizontalWireLowerBound < 1 || view.verticalWireLowerBound < 1 || view.viaLowerBound < 1) {
         throw std::invalid_argument("CPU maze heuristic cost bounds must be positive");
     }
@@ -130,12 +122,12 @@ bool layerEnabled(const CpuMazeSearchView& view, int layer) {
     return layer >= view.routingLayerBegin && layer <= view.routingLayerEnd;
 }
 
-int64_t mapCost(const std::vector<int>* map, int encoded, int fallback, int impassableCost) {
+int64_t mapCost(const std::vector<int>* map, int encoded, int fallback) {
     if (map == nullptr) {
         return fallback;
     }
     const int value = (*map)[static_cast<std::size_t>(encoded)];
-    if (value >= impassableCost) {
+    if (value < 0) {
         return INF_DISTANCE;
     }
     return std::max(1, value);
@@ -146,10 +138,11 @@ bool isBlocked(const std::vector<uint8_t>* map, int encoded) {
 }
 
 int64_t wireStepCost(const CpuMazeSearchView& view, int encoded) {
-    if (isBlocked(view.blockedWire, encoded)) {
+    if (isBlocked(view.blockedWire, encoded) ||
+        (view.capacity != nullptr && (*view.capacity)[encoded] < 0.01f)) {
         return INF_DISTANCE;
     }
-    int64_t cost = mapCost(view.wireCost, encoded, 1, view.impassableCost);
+    int64_t cost = mapCost(view.wireCost, encoded, 1);
     if (view.capacity != nullptr) {
         const float fixed = view.fixedUsage == nullptr
                                 ? 0.0f
@@ -168,7 +161,7 @@ int64_t viaStepCost(const CpuMazeSearchView& view, int encoded) {
     if (isBlocked(view.blockedVia, encoded)) {
         return INF_DISTANCE;
     }
-    int64_t cost = mapCost(view.viaCost, encoded, 1, view.impassableCost);
+    int64_t cost = mapCost(view.viaCost, encoded, 1);
     if (view.capacity != nullptr) {
         const float fixed = view.fixedUsage == nullptr
                                 ? 0.0f
@@ -257,9 +250,7 @@ SearchPath shortestPath(const CpuMazeSearchView& view,
         }
         return minimum;
     };
-    using FrontierEntry = std::tuple<int64_t, int64_t, int>;
-    std::priority_queue<FrontierEntry, std::vector<FrontierEntry>, std::greater<FrontierEntry>>
-        frontier;
+    auto& frontier = scratch.frontier;
     std::vector<int> orderedSources = sources;
     std::sort(orderedSources.begin(), orderedSources.end());
     orderedSources.erase(std::unique(orderedSources.begin(), orderedSources.end()), orderedSources.end());
@@ -267,18 +258,14 @@ SearchPath shortestPath(const CpuMazeSearchView& view,
         scratch.touched.push_back(source);
         distances[static_cast<std::size_t>(source)] = 0;
         previous[static_cast<std::size_t>(source)] = source;
-        frontier.emplace(remainingCost(source), 0, source);
+        frontier.pushOrDecrease(source, remainingCost(source), 0);
     }
 
     SearchPath result;
     int reached = -1;
     while (!frontier.empty()) {
-        const auto [priority, distance, current] = frontier.top();
-        (void)priority;
-        frontier.pop();
-        if (distance != distances[static_cast<std::size_t>(current)]) {
-            continue;
-        }
+        const int current = frontier.pop();
+        const int64_t distance = distances[static_cast<std::size_t>(current)];
         ++result.expandedStates;
         if (targets.count(current) != 0) {
             reached = current;
@@ -294,7 +281,7 @@ SearchPath shortestPath(const CpuMazeSearchView& view,
                 }
                 distances[static_cast<std::size_t>(next)] = nextDistance;
                 previous[static_cast<std::size_t>(next)] = current;
-                frontier.emplace(nextDistance + remainingCost(next), nextDistance, next);
+                frontier.pushOrDecrease(next, nextDistance + remainingCost(next), nextDistance);
             }
         });
     }
@@ -404,7 +391,7 @@ bool appendPinGroupVias(CpuRouteCandidate& candidate,
             return false;
         }
         const int via = viaIndex(shape, lowerLayer, x, y);
-        if (isBlocked(view.blockedVia, via)) {
+        if (viaStepCost(view, via) >= INF_DISTANCE) {
             return false;
         }
         appendViaIfMissing(candidate, via);
@@ -424,6 +411,11 @@ CpuMazeSearchResult failure(CpuMazeFailureReason reason, int netId, std::size_t 
 
 }  // namespace
 
+std::size_t cpuMazeGridSize(const CpuMazeSearchView& view) {
+    validateView(view);
+    return checkedGridSize(view);
+}
+
 void CpuMazeSearchScratch::reset(std::size_t nodeCount) {
     if (distances.size() != nodeCount || previous.size() != nodeCount) {
         distances.assign(nodeCount, INF_DISTANCE);
@@ -435,6 +427,13 @@ void CpuMazeSearchScratch::reset(std::size_t nodeCount) {
         }
     }
     touched.clear();
+    touched.reserve(nodeCount);
+    frontier.reset(nodeCount);
+}
+
+std::size_t CpuMazeSearchScratch::bytes() const {
+    return distances.capacity() * sizeof(int64_t) +
+           (previous.capacity() + touched.capacity()) * sizeof(int) + frontier.bytes();
 }
 
 const char* cpuMazeFailureReasonName(CpuMazeFailureReason reason) {
@@ -518,6 +517,8 @@ CpuMazeSearchResult CpuMazeRouter::route(const CpuMazeNet& net,
                     connected.push_back(encode(shape, point));
                 }
             }
+            std::sort(connected.begin(), connected.end());
+            connected.erase(std::unique(connected.begin(), connected.end()), connected.end());
         }
         std::sort(connected.begin(), connected.end());
         for (const auto& group : net.pinGroups) {
@@ -540,55 +541,6 @@ CpuMazeSearchResult CpuMazeRouter::route(const CpuMazeNet& net,
     } catch (const std::bad_alloc&) {
         return failure(CpuMazeFailureReason::RouteBuffer, net.netId);
     }
-}
-
-CpuMazeBatchResult CpuMazeRouter::routeBatch(const std::vector<CpuMazeNet>& nets,
-                                             const CpuMazeSearchView& view,
-                                             int requestedWorkers) const {
-    if (requestedWorkers <= 0) {
-        throw std::invalid_argument("CPU maze router workers must be positive");
-    }
-    validateView(view);
-    if (nets.size() > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
-        throw std::overflow_error("CPU maze batch net count exceeds INT_MAX");
-    }
-    const std::size_t nodeCount = checkedGridSize(view);
-    const std::size_t perNodeBytes = sizeof(int64_t) + 2 * sizeof(int) + 2 * sizeof(std::tuple<int64_t, int64_t, int>);
-    if (nodeCount > std::numeric_limits<std::size_t>::max() / perNodeBytes) {
-        throw std::overflow_error("CPU maze worker scratch size overflow");
-    }
-    const std::size_t scratchBytes = nodeCount * perNodeBytes;
-    const CpuWorkerLimit workerLimit =
-        chooseCpuRouteWorkers(requestedWorkers, static_cast<int>(nets.size()), scratchBytes);
-
-    CpuMazeBatchResult result;
-    result.requestedWorkers = requestedWorkers;
-    result.effectiveWorkers = workerLimit.effectiveWorkers;
-    result.scratchBytesPerWorker = scratchBytes;
-    result.memoryBudgetBytes = workerLimit.memoryBudgetBytes;
-    result.workerClampReason = workerLimit.clampReason;
-    result.results.resize(nets.size());
-    if (nets.empty()) {
-        return result;
-    }
-
-    CpuRouteWorkerPool workerPool(result.effectiveWorkers);
-    std::vector<CpuMazeSearchScratch> scratches(static_cast<std::size_t>(result.effectiveWorkers));
-    std::atomic<int> active{0}, maxActive{0};
-    std::vector<double> searchSeconds(nets.size(), 0.0);
-    workerPool.run(nets.size(), [&](int worker, std::size_t index) {
-        const int count = active.fetch_add(1) + 1;
-        int maximum = maxActive.load();
-        while (count > maximum && !maxActive.compare_exchange_weak(maximum, count)) {}
-        const auto started = std::chrono::steady_clock::now();
-        result.results[index] = route(nets[index], view, scratches[static_cast<std::size_t>(worker)]);
-        searchSeconds[index] = std::chrono::duration<double>(
-            std::chrono::steady_clock::now() - started).count();
-        active.fetch_sub(1);
-    });
-    result.maxActiveSearches = maxActive.load();
-    for (double seconds : searchSeconds) result.workerSearchSeconds += seconds;
-    return result;
 }
 
 }  // namespace gr

@@ -32,7 +32,6 @@ gr::CpuMazeSearchView makeView(std::vector<int>& wireUsage,
     view.blockedWire = &blockedWire;
     view.blockedVia = &blockedVia;
     view.overflowPenalty = 1000;
-    view.impassableCost = 10000000;
     return view;
 }
 
@@ -103,7 +102,7 @@ int main() {
     assert(impossible.failureReason == gr::CpuMazeFailureReason::Unreachable);
     state.restore(1, removedDetour);
     state.restoreCheckpoint(best);
-    assert(state.rawRoutes()[1] == best.rawRoutes[1]);
+    assert(state.rawRoutes()[1] == best.routes[1].rawRoute);
     assert(state.wires()[0] == 1 && state.wires()[1] == 1);
 
     state.remove(1);

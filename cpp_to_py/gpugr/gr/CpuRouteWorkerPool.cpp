@@ -1,75 +1,8 @@
 #include "CpuRouteWorkerPool.h"
 
-#include <algorithm>
-#include <fstream>
-#include <limits>
 #include <stdexcept>
 
 namespace gr {
-
-namespace {
-
-std::size_t availableMemoryBytes() {
-    std::ifstream meminfo("/proc/meminfo");
-    std::string key;
-    std::size_t kib = 0;
-    std::string unit;
-    while (meminfo >> key >> kib >> unit) {
-        if (key == "MemAvailable:") {
-            if (kib > std::numeric_limits<std::size_t>::max() / 1024) {
-                throw std::overflow_error("MemAvailable exceeds size_t");
-            }
-            return kib * 1024;
-        }
-    }
-    return 0;
-}
-
-}  // namespace
-
-CpuWorkerLimit chooseCpuRouteWorkers(int requestedWorkers,
-                                     int maxBatchSize,
-                                     std::size_t scratchBytesPerWorker) {
-    if (requestedWorkers <= 0) {
-        throw std::invalid_argument("CPU pattern-routing workers must be positive");
-    }
-    if (maxBatchSize <= 0) {
-        return {1, 0, "empty_route_set"};
-    }
-    if (scratchBytesPerWorker == 0) {
-        throw std::invalid_argument("CPU pattern-routing scratch size must be positive");
-    }
-
-    const unsigned hardware = std::thread::hardware_concurrency();
-    const int hardwareWorkers = hardware == 0 ? requestedWorkers : static_cast<int>(hardware);
-    const std::size_t available = availableMemoryBytes();
-    if (available == 0 && requestedWorkers > 1) {
-        throw std::runtime_error("cannot read /proc/meminfo MemAvailable for CPU route worker budget");
-    }
-    const std::size_t budget = available / 2;
-    const int memoryWorkers = available == 0
-                                  ? 1
-                                  : static_cast<int>(std::min<std::size_t>(
-                                        budget / scratchBytesPerWorker,
-                                        static_cast<std::size_t>(std::numeric_limits<int>::max())));
-    if (memoryWorkers < 1) {
-        throw std::runtime_error("insufficient MemAvailable for one CPU pattern-routing worker");
-    }
-
-    const int effective = std::max(
-        1, std::min({requestedWorkers, maxBatchSize, hardwareWorkers, memoryWorkers}));
-    std::string reason = "none";
-    if (effective < requestedWorkers) {
-        if (effective == memoryWorkers) {
-            reason = "memory_budget";
-        } else if (effective == maxBatchSize) {
-            reason = "max_batch_size";
-        } else {
-            reason = "hardware_concurrency";
-        }
-    }
-    return {effective, budget, reason};
-}
 
 CpuRouteWorkerPool::CpuRouteWorkerPool(int workerCount) {
     if (workerCount <= 0) {

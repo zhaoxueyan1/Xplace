@@ -234,6 +234,48 @@ int main() {
     steiner.branches.pop_back();
     assert(router.route(steiner, view).failureReason == gr::CpuMazeFailureReason::Unreachable);
 
+    // A saturated congestion cost is still a finite edge. Only explicit
+    // obstacles, zero wire capacity, negative costs or layer limits block it.
+    auto corridor = view;
+    corridor.routingLayerEnd = 0;
+    wireCost[0] = wireCost[1] = 10000000;
+    assert(router.route(direct, corridor).candidate.rawRoute == directRawRoute);
+    capacity[0] = 0;
+    assert(!router.route(direct, corridor).succeeded());
+    capacity[0] = 10;
+    blockedWire[0] = 1;
+    assert(!router.route(direct, corridor).succeeded());
+    blockedWire[0] = 0;
+    wireCost[0] = -1;
+    assert(!router.route(direct, corridor).succeeded());
+    wireCost[0] = wireCost[1] = 1;
+
+    // Ordinary via expansion and forced pin ladders use the same policy.
+    const gr::CpuMazeNet transition{10, {{{0, 0, 0}}, {{1, 0, 0}}}};
+    const gr::CpuMazeNet ladder{11, {{{0, 0, 0}, {1, 0, 0}}, {{1, 0, 0}}}};
+    viaCost[0] = 10000000;
+    assert(router.route(transition, view).succeeded());
+    assert(router.route(ladder, view).succeeded());
+    std::fill(blockedVia.begin(), blockedVia.end(), 1);
+    assert(!router.route(transition, view).succeeded());
+    assert(!router.route(ladder, view).succeeded());
+    std::fill(blockedVia.begin(), blockedVia.end(), 0);
+    std::fill(viaCost.begin(), viaCost.end(), -1);
+    assert(!router.route(transition, view).succeeded());
+    assert(!router.route(ladder, view).succeeded());
+    std::fill(viaCost.begin(), viaCost.end(), 1);
+
+    // Repeated decreases retain only one heap entry per node and preserve ties.
+    gr::CpuMazeFrontier frontier;
+    frontier.reset(128);
+    const auto bytes = frontier.bytes();
+    for (int priority = 100; priority > 0; --priority)
+        for (int node = 127; node >= 0; --node)
+            frontier.pushOrDecrease(node, priority, priority);
+    assert(frontier.bytes() == bytes);
+    for (int node = 0; node < 128; ++node) assert(frontier.pop() == node);
+    assert(frontier.empty());
+
     auto oversized = view;
     oversized.xSize = oversized.ySize = 50000;
     assert(router.route(direct, oversized).failureReason == gr::CpuMazeFailureReason::RouteBuffer);

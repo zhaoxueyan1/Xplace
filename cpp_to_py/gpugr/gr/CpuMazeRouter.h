@@ -1,6 +1,7 @@
 #pragma once
 
 #include "gpugr/gr/CpuRouteTypes.h"
+#include "gpugr/gr/CpuMazeFrontier.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -53,7 +54,6 @@ struct CpuMazeSearchView {
     const std::vector<uint8_t>* blockedWire = nullptr;
     const std::vector<uint8_t>* blockedVia = nullptr;
     int overflowPenalty = 1000000;
-    int impassableCost = 10000000;
     // Lower bounds remain valid as commit only increases congestion costs.
     int horizontalWireLowerBound = 1;
     int verticalWireLowerBound = 1;
@@ -74,6 +74,8 @@ struct CpuMazeSearchScratch {
     std::vector<int64_t> distances;
     std::vector<int> previous;
     std::vector<int> touched;
+    CpuMazeFrontier frontier;
+    std::size_t bytes() const;
 
     void reset(std::size_t nodeCount);
 };
@@ -88,6 +90,8 @@ struct CpuMazeBatchResult {
     int maxActiveSearches = 0;
     double workerSearchSeconds = 0.0;
 };
+
+std::size_t cpuMazeGridSize(const CpuMazeSearchView& view);
 
 class CpuMazeRouter {
 public:

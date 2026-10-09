@@ -1,4 +1,5 @@
 #include "CpuRouteTypes.h"
+#include "CpuRouteState.h"
 
 #include <algorithm>
 #include <limits>
@@ -99,10 +100,12 @@ uint64_t hashIntVector(const std::vector<int>& values) {
     return hash;
 }
 
-uint64_t hashRawRoutes(const std::vector<std::vector<int>>& routes) {
+template <typename RouteAt>
+uint64_t hashRoutes(std::size_t count, RouteAt routeAt) {
     uint64_t hash = 1469598103934665603ULL;
-    hashWord(routes.size(), hash);
-    for (const auto& route : routes) {
+    hashWord(count, hash);
+    for (std::size_t index = 0; index < count; ++index) {
+        const auto& route = routeAt(index);
         hashWord(route.size(), hash);
         for (int value : route) {
             hashWord(static_cast<uint64_t>(static_cast<int64_t>(value)), hash);
@@ -111,5 +114,12 @@ uint64_t hashRawRoutes(const std::vector<std::vector<int>>& routes) {
     return hash;
 }
 
+uint64_t hashRawRoutes(const std::vector<std::vector<int>>& routes) {
+    return hashRoutes(routes.size(), [&](std::size_t index) -> const auto& { return routes[index]; });
+}
+
+uint64_t hashRawRoutes(const std::vector<CpuRouteSnapshot>& routes) {
+    return hashRoutes(routes.size(), [&](std::size_t index) -> const auto& { return routes[index].rawRoute; });
+}
 
 }  // namespace gr

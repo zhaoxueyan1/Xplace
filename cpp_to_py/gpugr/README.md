@@ -43,8 +43,8 @@ Please refer to `cpp_to_py/gpugr/PyBindCppMain.cpp`.
   does not select `cpu_pr_mt`.
 - `threads`: Requested route workers for `cpu_pr_mt`. The native `run_stats()`
   result reports both requested and effective workers; the latter is clamped by
-  hardware concurrency, maximum batch size, and the preflight scratch-memory
-  budget. The same value may be used independently by the parser, so callers
+  CPU affinity, maximum batch size, and the memory budget (host available
+  memory limited by the process cgroup). The same value may be used independently by the parser, so callers
   should record parser threads separately.
 - `cpu_pr_mt` uses a deterministic CPU scheduler with a 4096-net batch cap and
   ends a batch after 100 consecutive bbox conflicts. These values are reported
@@ -58,6 +58,29 @@ Please refer to `cpp_to_py/gpugr/PyBindCppMain.cpp`.
   unexpected actual wire/via conflict is rerun serially before deterministic
   commit. This bounds cost-map refreshes and avoids speculative duplicate work
   on conflict-heavy designs without concurrent shared-state writes.
+- `cpu_pr_maze` is opt-in. It initializes with `cpu_pr_mt`; `rrrIters=0`
+  preserves exactly the same routes and usage. Positive RRR selects active nets
+  crossing overflowing resources, orders them by decreasing bbox area then net
+  ID, and searches fixed logical batches of at most 32 nets. Batch membership
+  does not change with worker count. Each batch reads current immutable cost
+  maps; commits refresh only dependent resources. A pending candidate is
+  re-searched when an integer cost on its route actually changed. Congested
+  finite costs, including the 10,000,000 cap, remain traversable; explicit
+  obstacles, physical grid bounds, zero wire capacity and layer limits govern
+  legality. Pin-access via ladders use the ordinary via-step legality check.
+- Maze searches use an indexed A* heap with at most one entry per grid node.
+  Worker selection includes live maps/routes, saved old routes, checkpoints,
+  fallback scratch, net inputs and bounded pending candidates. The worker pool
+  and scratch are reused across batches. `peak_memory_bytes` is a conservative
+  reservation for router-owned storage, **not measured process RSS**; this is
+  identified by `memory_accounting`. Record process peak RSS independently
+  when benchmarking. `maze_batch_size_limit` / `maze_max_batch_size` describe
+  the RRR batches; the existing batch fields describe initial PR.
+- Best-state selection is lexicographic on overflow excess, overflow resource
+  count, wire grid-edge count and via count. It does not optimize STA directly.
+  `rrr_iterations` and accepted/initial route QoR distinguish active overflow
+  nets, failed routes and unrouted eligible nets. Restoring a checkpoint rebuilds
+  usage and costs from one canonical route table.
 - `csrn_scale`: The size of coarsen grid in maze routing.
 - `route_guide`: The file name of output route guide.
 - `bottom_routing_layer` / `top_routing_layer`: Optional inclusive routing-layer
@@ -93,7 +116,8 @@ g++ -std=c++17 -O2 -Icpp_to_py \
 g++ -std=c++17 -O2 -pthread -Icpp_to_py \
     -o /tmp/unittest_cpu_route_worker_pool \
     cpp_to_py/gpugr/unittest_cpu_route_worker_pool.cpp \
-    cpp_to_py/gpugr/gr/CpuRouteWorkerPool.cpp
+    cpp_to_py/gpugr/gr/CpuRouteWorkerPool.cpp \
+    cpp_to_py/gpugr/gr/CpuRouteResourceLimits.cpp
 ```
 
 Each binary returns a zero exit status on success. The worker pool test also
@@ -103,7 +127,8 @@ has a ThreadSanitizer variant for the parallel dispatch paths:
 g++ -std=c++17 -O1 -g -fsanitize=thread -pthread -Icpp_to_py \
     -o /tmp/unittest_cpu_route_worker_pool_tsan \
     cpp_to_py/gpugr/unittest_cpu_route_worker_pool.cpp \
-    cpp_to_py/gpugr/gr/CpuRouteWorkerPool.cpp
+    cpp_to_py/gpugr/gr/CpuRouteWorkerPool.cpp \
+    cpp_to_py/gpugr/gr/CpuRouteResourceLimits.cpp
 ```
 
 ## Citation

@@ -1,5 +1,6 @@
 #include "CPURouter.h"
 #include "CpuMazeCostPolicy.h"
+#include "CpuMazeBatch.h"
 #include "CpuMazeCostUpdate.h"
 #include "PatternRoute.h"
 
@@ -35,7 +36,8 @@ CpuMazeSearchView CPURouter::mazeSearchView() const {
     // Native cost maps already include the CUDA-compatible congestion
     // schedule. The standalone maze fixture's extra penalty is not added.
     view.overflowPenalty = 0;
-    view.impassableCost = INF;
+    view.blockedWire = &mazeBlockedWire;
+    view.blockedVia = &mazeBlockedVia;
     view.horizontalWireLowerBound = mazeHorizontalLowerBound;
     view.verticalWireLowerBound = mazeVerticalLowerBound;
     view.viaLowerBound = mazeViaLowerBound;
@@ -100,134 +102,55 @@ void CPURouter::routeMazeRrr(std::vector<GrNet>& nets, int rrrIters, int request
     runStats.bestStateRestored = false;
     runStats.mazeRouteFailureCount = 0;
     runStats.conflictFallbackCount = 0;
-    runStats.peakMemoryBytes = runStats.scratchBytesPerWorker *
+    runStats.memoryAccounting = "conservative_router_storage_estimate_not_rss";
+    runStats.peakMemoryBytes = routeState.bytes() + cost.size() * 64 +
+                               runStats.scratchBytesPerWorker *
                                static_cast<std::size_t>(std::max(1, runStats.effectiveWorkers));
     runStats.mazeFailureReasons.clear();
     runStats.rrrIterations.clear();
 
-    struct OverflowReport {
-        std::vector<int> netIds;
-        int wireResourceCount = 0;
-        int viaResourceCount = 0;
-        double wireExcess = 0.0;
-        double viaExcess = 0.0;
-        int routedNetCount = 0;
-        int wireLength = 0;
-        int viaCount = 0;
-        uint64_t routeHash64 = 0;
-        uint64_t wireMapHash64 = 0;
-        uint64_t viaMapHash64 = 0;
-    };
-
-    auto makeReport = [&]() {
-        OverflowReport report;
-        for (int idx = 0; idx < LAYER * N * N; ++idx) {
-            if (overflowWire[idx] != 0) {
-                ++report.wireResourceCount;
-                report.wireExcess += std::max(
-                    0.0,
-                    static_cast<double>(routeState.wires()[idx]) + fixed[idx] +
-                        twoCellsViaUsage(idx) - capacity[idx]);
-            }
-        }
-        for (int idx = 0; idx < (LAYER - 1) * N * N; ++idx) {
-            if (overflowVia[idx] != 0) {
-                ++report.viaResourceCount;
-                const int layer = idx / N / N + 1;
-                const int y = idx % (N * N) / N;
-                const int x = idx % N;
-                const int upper = layer * N * N + x * N + y;
-                report.viaExcess += std::max(
-                    0.0,
-                    std::max(static_cast<double>(inCellUsedArea(idx) - capacity[idx]),
-                             static_cast<double>(inCellUsedArea(upper) - capacity[upper])));
-            }
-        }
-        for (int netId = 0; netId < static_cast<int>(nets.size()); ++netId) {
-            const auto& net = nets[netId];
-            const auto& rawRoute = routeState.rawRoutes()[netId];
-            if (!net.noroute && net.exclusion == NetExclusion::None &&
-                !rawRoute.empty() && rawRoute[0] > 0) {
-                ++report.routedNetCount;
-            }
-            if (net.noroute || net.exclusion != NetExclusion::None || rawRoute.empty() ||
-                rawRoute[0] <= 0) {
-                continue;
-            }
-            const int end = std::min(static_cast<int>(rawRoute.size()), rawRoute[0]);
-            bool overflow = false;
-            for (int i = 1; i + 1 < end && !overflow; i += 2) {
-                const int point = rawRoute[i];
-                const int span = rawRoute[i + 1];
-                if (span == -1) {
-                    overflow = point >= 0 && point < static_cast<int>(overflowVia.size()) &&
-                               overflowVia[point] != 0;
-                } else if (span > 0) {
-                    for (int offset = 0; offset < span; ++offset) {
-                        const int resource = point + offset;
-                        if (resource >= 0 && resource < static_cast<int>(overflowWire.size()) &&
-                            overflowWire[resource] != 0) {
-                            overflow = true;
-                            break;
-                        }
-                    }
-                }
-            }
-            if (overflow) {
-                report.netIds.push_back(netId);
-            }
-            for (int i = 1; i + 1 < end; i += 2) {
-                if (rawRoute[i + 1] == -1) {
-                    ++report.viaCount;
-                } else if (rawRoute[i + 1] > 0) {
-                    report.wireLength += rawRoute[i + 1];
-                }
-            }
-        }
-        report.routeHash64 = hashRawRoutes(routeState.rawRoutes());
-        report.wireMapHash64 = hashIntVector(routeState.wires());
-        report.viaMapHash64 = hashIntVector(routeState.vias());
-        return report;
-    };
-
     auto metric = [](const OverflowReport& report) {
-        return std::tuple<double, int, int, int>(report.wireExcess + report.viaExcess,
-                                                 report.wireResourceCount + report.viaResourceCount,
-                                                 report.wireLength,
-                                                 report.viaCount);
+        const auto& qor = report.qor;
+        return std::tuple<double, int, int, int>(qor.overflowWireExcess + qor.overflowViaExcess,
+                                                 qor.overflowWireResourceCount + qor.overflowViaResourceCount,
+                                                 qor.wireLength, qor.viaCount);
     };
-
-    OverflowReport bestReport = makeReport();
-    auto reportQor = [](const OverflowReport& report) {
-        CpuRouteRunStats::RrrIteration qor;
-        qor.overflowNetCount = static_cast<int>(report.netIds.size());
-        qor.overflowWireResourceCount = report.wireResourceCount;
-        qor.overflowViaResourceCount = report.viaResourceCount;
-        qor.overflowWireExcess = report.wireExcess;
-        qor.overflowViaExcess = report.viaExcess;
-        qor.wireLength = report.wireLength;
-        qor.viaCount = report.viaCount;
-        qor.routedNetCount = report.routedNetCount;
-        qor.routeHash64 = report.routeHash64;
-        qor.wireMapHash64 = report.wireMapHash64;
-        qor.viaMapHash64 = report.viaMapHash64;
-        return qor;
-    };
+    OverflowReport bestReport = overflowReport;
     runStats.hasRouteQor = true;
-    runStats.initialRouteQor = reportQor(bestReport);
+    runStats.initialRouteQor = bestReport.qor;
     runStats.acceptedRouteQor = runStats.initialRouteQor;
     if (rrrIters == 0) {
         runStats.totalSeconds = elapsedSeconds(totalStart);
         return;
     }
+    mazeBlockedWire.assign(cost.size(), 1);
+    mazeBlockedVia.assign(viaCostMap.size(), 1);
+    for (int layer = routingLayerBegin; layer <= routingLayerEnd; ++layer) {
+        for (int x = 0; x < X; ++x) {
+            for (int y = 0; y < Y; ++y) {
+                const int resource = encodedIndex(layer, x, y);
+                const bool vertical = ((layer & 1) ^ DIRECTION) != 0;
+                if ((vertical ? y + 1 < Y : x + 1 < X) && capacity[resource] >= 0.01f) {
+                    mazeBlockedWire[resource] = 0;
+                }
+                if (layer < routingLayerEnd) {
+                    // Capacity is wire-track capacity, not via legality. Match
+                    // CUDA's finite via cost even in zero-track pin-access cells.
+                    // Layer and physical-grid restrictions still apply.
+                    mazeBlockedVia[resource] = 0;
+                }
+            }
+        }
+    }
     auto checkpoint = routeState.checkpoint();
     auto bestMetric = metric(bestReport);
     CpuMazeRouter mazeRouter;
     CpuMazeSearchScratch fallbackScratch;
+    runStats.mazeBatchSizeLimit = CPU_MAZE_BATCH_SIZE;
 
     for (int iter = 1; iter <= rrrIters; ++iter) {
         const auto iterationStart = SteadyClock::now();
-        OverflowReport before = makeReport();
+        OverflowReport before = overflowReport;
         std::sort(before.netIds.begin(), before.netIds.end(), [&](int lhs, int rhs) {
             const int lhsArea = nets[lhs].area();
             const int rhsArea = nets[rhs].area();
@@ -261,28 +184,29 @@ void CPURouter::routeMazeRrr(std::vector<GrNet>& nets, int rrrIters, int request
             if (!isRoutingLayerEnabled(layer)) continue;
             auto& wireBound = ((layer & 1) ^ DIRECTION)
                                   ? mazeVerticalLowerBound : mazeHorizontalLowerBound;
-            if (cost[resource] < INF) wireBound = std::min(wireBound, std::max(1, cost[resource]));
-            if (layer < routingLayerEnd && viaCostMap[resource] < INF) {
+            if (!mazeBlockedWire[resource]) wireBound = std::min(wireBound, std::max(1, cost[resource]));
+            if (!mazeBlockedVia[resource]) {
                 mazeViaLowerBound = std::min(mazeViaLowerBound, std::max(1, viaCostMap[resource]));
             }
         }
         double costSeconds = elapsedSeconds(costStart);
 
-        std::vector<CpuMazeNet> mazeNets;
-        mazeNets.reserve(before.netIds.size());
-        for (int netId : before.netIds) mazeNets.push_back(mazeNet(nets[netId], netId));
-        const auto searchStart = SteadyClock::now();
-        const CpuMazeBatchResult batch = mazeRouter.routeBatch(mazeNets, mazeSearchView(), requestedWorkers);
-        const double searchSeconds = elapsedSeconds(searchStart);
-        logger.info("CPU maze batch search iteration=%d seconds=%.4f effective_workers=%d max_active=%d",
-                    iter, searchSeconds, batch.effectiveWorkers, batch.maxActiveSearches);
-        runStats.effectiveWorkers = batch.effectiveWorkers;
-        runStats.workerClampReason = batch.workerClampReason;
-        runStats.scratchBytesPerWorker = std::max(runStats.scratchBytesPerWorker, batch.scratchBytesPerWorker);
-        runStats.memoryBudgetBytes = std::max(runStats.memoryBudgetBytes, batch.memoryBudgetBytes);
-        runStats.peakMemoryBytes = std::max(
-            runStats.peakMemoryBytes,
-            batch.scratchBytesPerWorker * static_cast<std::size_t>(std::max(1, batch.effectiveWorkers)));
+        CpuMazeBatchRouter batchRouter(mazeSearchView(), requestedWorkers, CPU_MAZE_BATCH_SIZE);
+        auto sharedBytes = [&]() {
+            auto bytes = [](const auto& values) { return values.capacity() * sizeof(values.front()); };
+            // Include saved routes, best checkpoint, replacement checkpoint,
+            // full map restore buffers, changed-resource flags and fallback scratch.
+            return 2 * routeState.bytes() + cpuRouteSnapshotsBytes(oldRoutes) +
+                   cpuRouteSnapshotsBytes(checkpoint.routes) +
+                   bytes(capacity) + bytes(wireDist) + bytes(fixedLength) + bytes(fixed) +
+                   bytes(fixUsage) + bytes(movUsage) + bytes(cost) + bytes(viaCostMap) +
+                   bytes(costSum) + bytes(overflowWire) + bytes(overflowVia) +
+                   bytes(mazeBlockedWire) + bytes(mazeBlockedVia) +
+                   bytes(unitShortCost) + bytes(unitShortCostDiscounted) +
+                   cost.size() * (2 + 192) + nets.size() * 16;
+        };
+        double searchSeconds = 0.0, workerSearchSeconds = 0.0;
+        int parallelBatches = 0, maxActiveSearches = 0;
 
         std::vector<uint8_t> changedWireCost(cost.size(), 0);
         std::vector<uint8_t> changedViaCost(viaCostMap.size(), 0);
@@ -290,12 +214,14 @@ void CPURouter::routeMazeRrr(std::vector<GrNet>& nets, int rrrIters, int request
             const auto start = SteadyClock::now();
             const auto update = cpuMazeCostUpdate(route.wireDeltas, route.viaDeltas, LAYER, N);
             for (int resource : update.wires) {
-                cost[resource] = calcWireCost(resource);
-                changedWireCost[resource] = 1;
+                const int next = calcWireCost(resource);
+                if (next != cost[resource]) changedWireCost[resource] = 1;
+                cost[resource] = next;
             }
             for (int resource : update.vias) {
-                viaCostMap[resource] = calcViaCost(resource);
-                changedViaCost[resource] = 1;
+                const int next = calcViaCost(resource);
+                if (next != viaCostMap[resource]) changedViaCost[resource] = 1;
+                viaCostMap[resource] = next;
             }
             costSeconds += elapsedSeconds(start);
         };
@@ -316,52 +242,72 @@ void CPURouter::routeMazeRrr(std::vector<GrNet>& nets, int rrrIters, int request
         double commitSeconds = 0.0;
         double rollbackSeconds = 0.0;
         double fallbackSearchSeconds = 0.0;
-        bool stateInvalidated = false;
-        for (std::size_t index = 0; index < before.netIds.size(); ++index) {
-            const int netId = before.netIds[index];
-            CpuMazeSearchResult result = batch.results[index];
-            if (stateInvalidated || !result.succeeded() || candidateIsStale(result.candidate)) {
-                ++conflictFallbacks;
-                const auto fallbackStart = SteadyClock::now();
-                result = mazeRouter.route(mazeNets[index], mazeSearchView(), fallbackScratch);
-                fallbackSearchSeconds += elapsedSeconds(fallbackStart);
+        for (std::size_t begin = 0; begin < before.netIds.size(); begin += CPU_MAZE_BATCH_SIZE) {
+            const std::size_t end = std::min(before.netIds.size(), begin + CPU_MAZE_BATCH_SIZE);
+            std::vector<CpuMazeNet> mazeNets;
+            mazeNets.reserve(end - begin);
+            for (std::size_t index = begin; index < end; ++index)
+                mazeNets.push_back(mazeNet(nets[before.netIds[index]], before.netIds[index]));
+            std::fill(changedWireCost.begin(), changedWireCost.end(), 0);
+            std::fill(changedViaCost.begin(), changedViaCost.end(), 0);
+            const auto searchStart = SteadyClock::now();
+            auto batch = batchRouter.search(mazeNets, mazeSearchView(), sharedBytes());
+            searchSeconds += elapsedSeconds(searchStart);
+            workerSearchSeconds += batch.workerSearchSeconds;
+            maxActiveSearches = std::max(maxActiveSearches, batch.maxActiveSearches);
+            if (batch.effectiveWorkers > 1 && mazeNets.size() > 1) ++parallelBatches;
+            runStats.effectiveWorkers = batch.effectiveWorkers;
+            runStats.workerClampReason = batch.workerClampReason;
+            runStats.scratchBytesPerWorker = std::max(runStats.scratchBytesPerWorker, batch.scratchBytesPerWorker);
+            runStats.memoryBudgetBytes = batch.memoryBudgetBytes;
+            runStats.mazeMaxBatchSize = std::max(runStats.mazeMaxBatchSize, static_cast<int>(mazeNets.size()));
+            runStats.peakMemoryBytes = std::max(runStats.peakMemoryBytes,
+                batchRouter.reservedBytes() + batch.scratchBytesPerWorker * batch.effectiveWorkers);
+            for (std::size_t index = begin; index < end; ++index) {
+                const int netId = before.netIds[index];
+                CpuMazeSearchResult result = std::move(batch.results[index - begin]);
+                if (!result.succeeded() || candidateIsStale(result.candidate)) {
+                    ++conflictFallbacks;
+                    const auto fallbackStart = SteadyClock::now();
+                    result = mazeRouter.route(mazeNets[index - begin], mazeSearchView(), fallbackScratch);
+                    fallbackSearchSeconds += elapsedSeconds(fallbackStart);
+                }
+                // Re-search observes current committed usage. Sharing a gcell
+                // resource is legal in global routing and is priced by its cost;
+                // it must not be rejected as another stale-snapshot conflict.
+                if (!result.succeeded()) {
+                    ++failed;
+                    ++runStats.mazeRouteFailureCount;
+                    ++runStats.mazeFailureReasons[cpuMazeFailureReasonName(result.failureReason)];
+                    const auto rollbackStart = SteadyClock::now();
+                    routeState.restore(netId, oldRoutes[index]);
+                    setNetRouteFromRaw(nets[netId], oldRoutes[index].rawRoute);
+                    refreshCosts(oldRoutes[index]);
+                    rollbackSeconds += elapsedSeconds(rollbackStart);
+                    continue;
+                }
+                const auto commitStart = SteadyClock::now();
+                routeState.commit(result.candidate);
+                setNetRouteFromRaw(nets[netId], result.candidate.rawRoute);
+                commitSeconds += elapsedSeconds(commitStart);
+                ++rerouted;
+                refreshCosts(result.candidate);
             }
-            // Re-search observes current committed usage. Sharing a gcell
-            // resource is legal in global routing and is priced by its cost;
-            // it must not be rejected as another stale-snapshot conflict.
-            if (!result.succeeded()) {
-                ++failed;
-                ++runStats.mazeRouteFailureCount;
-                ++runStats.mazeFailureReasons[cpuMazeFailureReasonName(result.failureReason)];
-                const auto rollbackStart = SteadyClock::now();
-                routeState.restore(netId, oldRoutes[index]);
-                setNetRouteFromRaw(nets[netId], oldRoutes[index].rawRoute);
-                refreshCosts(oldRoutes[index]);
-                rollbackSeconds += elapsedSeconds(rollbackStart);
-                stateInvalidated = true;
-                continue;
-            }
-            const auto commitStart = SteadyClock::now();
-            routeState.commit(result.candidate);
-            setNetRouteFromRaw(nets[netId], result.candidate.rawRoute);
-            commitSeconds += elapsedSeconds(commitStart);
-            ++rerouted;
-            refreshCosts(result.candidate);
         }
 
         markOverflowNets(nets);
-        OverflowReport after = makeReport();
-        CpuRouteRunStats::RrrIteration iteration = reportQor(after);
+        OverflowReport after = overflowReport;
+        CpuRouteRunStats::RrrIteration iteration = after.qor;
         iteration.iteration = iter;
         iteration.selectedNetCount = static_cast<int>(before.netIds.size());
         iteration.reroutedNetCount = rerouted;
         iteration.failedNetCount = failed;
-        iteration.parallelBatchCount = batch.effectiveWorkers > 1 && batch.results.size() > 1 ? 1 : 0;
+        iteration.parallelBatchCount = parallelBatches;
         iteration.conflictFallbackCount = conflictFallbacks;
         iteration.searchSeconds = searchSeconds;
         iteration.fallbackSearchSeconds = fallbackSearchSeconds;
-        iteration.maxActiveSearches = batch.maxActiveSearches;
-        iteration.workerSearchSeconds = batch.workerSearchSeconds;
+        iteration.maxActiveSearches = maxActiveSearches;
+        iteration.workerSearchSeconds = workerSearchSeconds;
         iteration.costRebuildSeconds = costSeconds;
         iteration.commitSeconds = commitSeconds;
         iteration.rollbackSeconds = rollbackSeconds;
@@ -386,19 +332,20 @@ void CPURouter::routeMazeRrr(std::vector<GrNet>& nets, int rrrIters, int request
         }
     }
 
-    const OverflowReport finalReport = makeReport();
-    if (metric(finalReport) != bestMetric || finalReport.routeHash64 != bestReport.routeHash64) {
+    const OverflowReport finalReport = overflowReport;
+    if (metric(finalReport) != bestMetric || finalReport.qor.routeHash64 != bestReport.qor.routeHash64) {
         routeState.restoreCheckpoint(checkpoint);
         for (int netId = 0; netId < static_cast<int>(nets.size()); ++netId) {
-            setNetRouteFromRaw(nets[netId], routeState.rawRoutes()[netId]);
+            setNetRouteFromRaw(nets[netId], routeState.rawRoute(netId));
         }
+        calculateCostMaps();
         markOverflowNets(nets);
         runStats.bestStateRestored = true;
     }
-    runStats.routeHash64 = hashRawRoutes(routeState.rawRoutes());
+    runStats.routeHash64 = hashRawRoutes(routeState.routes());
     runStats.wireMapHash64 = hashIntVector(routeState.wires());
     runStats.viaMapHash64 = hashIntVector(routeState.vias());
-    runStats.acceptedRouteQor = reportQor(bestReport);
+    runStats.acceptedRouteQor = bestReport.qor;
     runStats.totalSeconds = elapsedSeconds(totalStart);
     runStats.terminalStatus = "completed";
 }

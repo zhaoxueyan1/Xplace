@@ -1060,6 +1060,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
             result["maze_failure_reasons"] = stats.mazeFailureReasons;
             result["conflict_fallback_count"] = stats.conflictFallbackCount;
             result["peak_memory_bytes"] = stats.peakMemoryBytes;
+            result["memory_accounting"] = stats.memoryAccounting;
+            result["maze_batch_size_limit"] = stats.mazeBatchSizeLimit;
+            result["maze_max_batch_size"] = stats.mazeMaxBatchSize;
             pybind11::list rrrIterations;
             auto iterationStats = [](const auto& iteration) {
                 pybind11::dict item;
@@ -1075,6 +1078,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
                 item["wire_length"] = iteration.wireLength;
                 item["via_count"] = iteration.viaCount;
                 item["routed_net_count"] = iteration.routedNetCount;
+                item["failed_route_count"] = iteration.failedRouteCount;
+                item["unrouted_net_count"] = iteration.unroutedNetCount;
                 item["route_hash64"] = iteration.routeHash64;
                 item["wire_map_hash64"] = iteration.wireMapHash64;
                 item["via_map_hash64"] = iteration.viaMapHash64;

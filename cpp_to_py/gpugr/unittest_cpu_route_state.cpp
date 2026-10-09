@@ -72,7 +72,8 @@ int main() {
     atomicCandidate.rawRoute = {5, 2, 1, 5, 1};
     atomicCandidate.wireDeltas = {{2, 1}, {5, 1}};
     atomic.commit(atomicCandidate);
-    atomic.wires()[2] = 0;
+    // Deliberately corrupt a const map to exercise atomic underflow handling.
+    const_cast<std::vector<int>&>(atomic.wires())[2] = 0;
     assertThrows<std::runtime_error>([&] { atomic.remove(0); });
     assert(atomic.wires()[5] == 1);
     assert(atomic.snapshot(0).active);
@@ -87,12 +88,12 @@ int main() {
     repeated.wireDeltas = {{2, 1}, {2, 1}};
     repeated.viaDeltas = {5, 5};
     duplicate.commit(repeated);
-    duplicate.wires()[2] = 1;
+    const_cast<std::vector<int>&>(duplicate.wires())[2] = 1;
     assertThrows<std::runtime_error>([&] { duplicate.remove(0); });
     assert(duplicate.wires()[2] == 1 && duplicate.vias()[5] == 2);
     assert(duplicate.snapshot(0).active);
-    duplicate.wires()[2] = 2;
-    duplicate.vias()[5] = 1;
+    const_cast<std::vector<int>&>(duplicate.wires())[2] = 2;
+    const_cast<std::vector<int>&>(duplicate.vias())[5] = 1;
     assertThrows<std::runtime_error>([&] { duplicate.remove(0); });
     assert(duplicate.wires()[2] == 2 && duplicate.vias()[5] == 1);
 
@@ -129,7 +130,14 @@ int main() {
     for (int usage : randomized.vias()) assert(usage == 0);
     randomized.restoreCheckpoint(saved);
     assert(randomized.wires() == wires && randomized.vias() == vias);
-    assert(randomized.rawRoutes() == saved.rawRoutes);
+    for (int net = 0; net < 100; ++net)
+        assert(randomized.rawRoute(net) == saved.routes[net].rawRoute);
+    auto broken = saved;
+    broken.routes[0].rawRoute[1] += 1;
+    const auto beforeRoutes = randomized.rawRoutes();
+    assertThrows<std::runtime_error>([&] { randomized.restoreCheckpoint(broken); });
+    assert(randomized.rawRoutes() == beforeRoutes);
+    assert(randomized.wires() == wires && randomized.vias() == vias);
 
     const gr::CpuRouteCheckpoint checkpoint = state.checkpoint();
     state.resetResources(16);

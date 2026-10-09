@@ -20,7 +20,12 @@ struct CpuWorkerLimit {
 
 CpuWorkerLimit chooseCpuRouteWorkers(int requestedWorkers,
                                      int maxBatchSize,
-                                     std::size_t scratchBytesPerWorker);
+                                     std::size_t scratchBytesPerWorker,
+                                     std::size_t reservedBytes = 0);
+CpuWorkerLimit limitCpuRouteWorkers(int requestedWorkers, int maxBatchSize,
+                                    std::size_t scratchBytesPerWorker,
+                                    std::size_t reservedBytes, std::size_t memoryBudgetBytes,
+                                    int hardwareWorkers);
 
 class CpuRouteWorkerPool {
 public:
