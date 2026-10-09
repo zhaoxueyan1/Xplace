@@ -103,6 +103,14 @@ struct CpuRouteRunStats {
         double fallbackSearchSeconds = 0.0;
         int maxActiveSearches = 0;
         double workerSearchSeconds = 0.0;
+        double coarseBuildSeconds = 0.0;
+        int mazeCoarseningScale = 1;
+        int mazeCoarseXSize = 0;
+        int mazeCoarseYSize = 0;
+        std::size_t coarseExpandedStates = 0;
+        std::size_t fineExpandedStates = 0;
+        int corridorRetries = 0;
+        int fullSearchFallbacks = 0;
         double costRebuildSeconds = 0.0;
         double commitSeconds = 0.0;
         double rollbackSeconds = 0.0;

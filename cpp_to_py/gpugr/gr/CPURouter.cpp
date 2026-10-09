@@ -59,6 +59,7 @@ void CPURouter::initialize(const gr::GRDatabase& grdb, const std::string& backen
     DIRECTION = grdb.m1direction;
     routingLayerBegin = grdb.routingLayerBegin;
     routingLayerEnd = grdb.routingLayerEnd;
+    mazeCoarseningScale = grdb.csrnScale;
     const int gridGraphSize = LAYER * N * N;
     routeState.resetResources(static_cast<std::size_t>(gridGraphSize));
     cost.assign(gridGraphSize, INF);

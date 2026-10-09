@@ -117,6 +117,7 @@ private:
     int mazeHorizontalLowerBound = 1;
     int mazeVerticalLowerBound = 1;
     int mazeViaLowerBound = 1;
+    int mazeCoarseningScale = 1;
     int numOvflNets = 0;
     CpuRouteState routeState;
     CpuRouteRunStats runStats;

@@ -10,6 +10,8 @@
 
 namespace gr {
 
+class CpuMazeCoarseGrid;
+
 struct CpuMazePoint {
     int layer = -1;
     int x = -1;
@@ -58,19 +60,29 @@ struct CpuMazeSearchView {
     int horizontalWireLowerBound = 1;
     int verticalWireLowerBound = 1;
     int viaLowerBound = 1;
+    // Optional, immutable batch snapshot used only to guide fine-grid search.
+    const CpuMazeCoarseGrid* coarseGrid = nullptr;
+};
+
+struct CpuMazeSearchStats {
+    std::size_t coarseExpandedStates = 0;
+    std::size_t fineExpandedStates = 0;
+    int corridorRetries = 0;
+    int fullSearchFallbacks = 0;
 };
 
 struct CpuMazeSearchResult {
     CpuRouteCandidate candidate;
     CpuMazeFailureReason failureReason = CpuMazeFailureReason::None;
     std::size_t expandedStates = 0;
+    CpuMazeSearchStats searchStats;
 
     bool succeeded() const { return failureReason == CpuMazeFailureReason::None; }
 };
 
 // One instance per worker, also reused by deterministic serial re-search.
 // Reset only visited nodes between branches rather than clearing the chip.
-struct CpuMazeSearchScratch {
+struct CpuMazePathScratch {
     std::vector<int64_t> distances;
     std::vector<int> previous;
     std::vector<int> touched;
@@ -78,6 +90,12 @@ struct CpuMazeSearchScratch {
     std::size_t bytes() const;
 
     void reset(std::size_t nodeCount);
+};
+
+struct CpuMazeSearchScratch {
+    CpuMazePathScratch fine;
+    CpuMazePathScratch coarse;
+    std::size_t bytes() const;
 };
 
 struct CpuMazeBatchResult {

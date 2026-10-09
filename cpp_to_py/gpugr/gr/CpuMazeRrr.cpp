@@ -1,5 +1,6 @@
 #include "CPURouter.h"
 #include "CpuMazeCostPolicy.h"
+#include "CpuMazeCoarseGrid.h"
 #include "CpuMazeBatch.h"
 #include "CpuMazeCostUpdate.h"
 #include "PatternRoute.h"
@@ -191,7 +192,13 @@ void CPURouter::routeMazeRrr(std::vector<GrNet>& nets, int rrrIters, int request
         }
         double costSeconds = elapsedSeconds(costStart);
 
-        CpuMazeBatchRouter batchRouter(mazeSearchView(), requestedWorkers, CPU_MAZE_BATCH_SIZE);
+        CpuMazeCoarseGrid coarseGrid(mazeSearchView(), mazeCoarseningScale, X, Y);
+        auto guidedView = [&]() {
+            auto view = mazeSearchView();
+            view.coarseGrid = &coarseGrid;
+            return view;
+        };
+        CpuMazeBatchRouter batchRouter(guidedView(), requestedWorkers, CPU_MAZE_BATCH_SIZE);
         auto sharedBytes = [&]() {
             auto bytes = [](const auto& values) { return values.capacity() * sizeof(values.front()); };
             // Include saved routes, best checkpoint, replacement checkpoint,
@@ -203,9 +210,18 @@ void CPURouter::routeMazeRrr(std::vector<GrNet>& nets, int rrrIters, int request
                    bytes(costSum) + bytes(overflowWire) + bytes(overflowVia) +
                    bytes(mazeBlockedWire) + bytes(mazeBlockedVia) +
                    bytes(unitShortCost) + bytes(unitShortCostDiscounted) +
-                   cost.size() * (2 + 256) + nets.size() * 16;
+                   cost.size() * (2 + 256) + nets.size() * 16 +
+                   coarseGrid.nodeCount() * 64;
         };
         double searchSeconds = 0.0, workerSearchSeconds = 0.0;
+        double coarseBuildSeconds = 0.0;
+        CpuMazeSearchStats searchStats;
+        auto collectSearchStats = [&](const CpuMazeSearchResult& result) {
+            searchStats.coarseExpandedStates += result.searchStats.coarseExpandedStates;
+            searchStats.fineExpandedStates += result.searchStats.fineExpandedStates;
+            searchStats.corridorRetries += result.searchStats.corridorRetries;
+            searchStats.fullSearchFallbacks += result.searchStats.fullSearchFallbacks;
+        };
         int parallelBatches = 0, maxActiveSearches = 0;
 
         std::vector<uint8_t> changedWireCost(cost.size(), 0);
@@ -215,12 +231,18 @@ void CPURouter::routeMazeRrr(std::vector<GrNet>& nets, int rrrIters, int request
             const auto update = cpuMazeCostUpdate(route.wireDeltas, route.viaDeltas, LAYER, N);
             for (int resource : update.wires) {
                 const int next = calcWireCost(resource);
-                if (next != cost[resource]) changedWireCost[resource] = 1;
+                if (next != cost[resource]) {
+                    changedWireCost[resource] = 1;
+                    coarseGrid.invalidate(resource);
+                }
                 cost[resource] = next;
             }
             for (int resource : update.vias) {
                 const int next = calcViaCost(resource);
-                if (next != viaCostMap[resource]) changedViaCost[resource] = 1;
+                if (next != viaCostMap[resource]) {
+                    changedViaCost[resource] = 1;
+                    coarseGrid.invalidate(resource);
+                }
                 viaCostMap[resource] = next;
             }
             costSeconds += elapsedSeconds(start);
@@ -250,8 +272,11 @@ void CPURouter::routeMazeRrr(std::vector<GrNet>& nets, int rrrIters, int request
                 mazeNets.push_back(mazeNet(nets[before.netIds[index]], before.netIds[index]));
             std::fill(changedWireCost.begin(), changedWireCost.end(), 0);
             std::fill(changedViaCost.begin(), changedViaCost.end(), 0);
+            const auto coarseStart = SteadyClock::now();
+            coarseGrid.refresh(mazeSearchView());
+            coarseBuildSeconds += elapsedSeconds(coarseStart);
             const auto searchStart = SteadyClock::now();
-            auto batch = batchRouter.search(mazeNets, mazeSearchView(), sharedBytes());
+            auto batch = batchRouter.search(mazeNets, guidedView(), sharedBytes());
             searchSeconds += elapsedSeconds(searchStart);
             workerSearchSeconds += batch.workerSearchSeconds;
             maxActiveSearches = std::max(maxActiveSearches, batch.maxActiveSearches);
@@ -266,10 +291,12 @@ void CPURouter::routeMazeRrr(std::vector<GrNet>& nets, int rrrIters, int request
             for (std::size_t index = begin; index < end; ++index) {
                 const int netId = before.netIds[index];
                 CpuMazeSearchResult result = std::move(batch.results[index - begin]);
+                collectSearchStats(result);
                 if (!result.succeeded() || candidateIsStale(result.candidate)) {
                     ++conflictFallbacks;
                     const auto fallbackStart = SteadyClock::now();
-                    result = mazeRouter.route(mazeNets[index - begin], mazeSearchView(), fallbackScratch);
+                    result = mazeRouter.route(mazeNets[index - begin], guidedView(), fallbackScratch);
+                    collectSearchStats(result);
                     fallbackSearchSeconds += elapsedSeconds(fallbackStart);
                 }
                 // Re-search observes current committed usage. Sharing a gcell
@@ -308,6 +335,14 @@ void CPURouter::routeMazeRrr(std::vector<GrNet>& nets, int rrrIters, int request
         iteration.fallbackSearchSeconds = fallbackSearchSeconds;
         iteration.maxActiveSearches = maxActiveSearches;
         iteration.workerSearchSeconds = workerSearchSeconds;
+        iteration.coarseBuildSeconds = coarseBuildSeconds;
+        iteration.mazeCoarseningScale = mazeCoarseningScale;
+        iteration.mazeCoarseXSize = 1 + (X - 1) / mazeCoarseningScale;
+        iteration.mazeCoarseYSize = 1 + (Y - 1) / mazeCoarseningScale;
+        iteration.coarseExpandedStates = searchStats.coarseExpandedStates;
+        iteration.fineExpandedStates = searchStats.fineExpandedStates;
+        iteration.corridorRetries = searchStats.corridorRetries;
+        iteration.fullSearchFallbacks = searchStats.fullSearchFallbacks;
         iteration.costRebuildSeconds = costSeconds;
         iteration.commitSeconds = commitSeconds;
         iteration.rollbackSeconds = rollbackSeconds;

@@ -1090,6 +1090,14 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
                 item["fallback_search_seconds"] = iteration.fallbackSearchSeconds;
                 item["max_active_searches"] = iteration.maxActiveSearches;
                 item["worker_search_seconds"] = iteration.workerSearchSeconds;
+                item["coarse_build_seconds"] = iteration.coarseBuildSeconds;
+                item["maze_coarsening_scale"] = iteration.mazeCoarseningScale;
+                item["maze_coarse_x_size"] = iteration.mazeCoarseXSize;
+                item["maze_coarse_y_size"] = iteration.mazeCoarseYSize;
+                item["coarse_expanded_states"] = iteration.coarseExpandedStates;
+                item["fine_expanded_states"] = iteration.fineExpandedStates;
+                item["corridor_retries"] = iteration.corridorRetries;
+                item["full_search_fallbacks"] = iteration.fullSearchFallbacks;
                 item["cost_rebuild_seconds"] = iteration.costRebuildSeconds;
                 item["commit_seconds"] = iteration.commitSeconds;
                 item["rollback_seconds"] = iteration.rollbackSeconds;
