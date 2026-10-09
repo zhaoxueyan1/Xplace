@@ -203,7 +203,7 @@ void CPURouter::routeMazeRrr(std::vector<GrNet>& nets, int rrrIters, int request
                    bytes(costSum) + bytes(overflowWire) + bytes(overflowVia) +
                    bytes(mazeBlockedWire) + bytes(mazeBlockedVia) +
                    bytes(unitShortCost) + bytes(unitShortCostDiscounted) +
-                   cost.size() * (2 + 192) + nets.size() * 16;
+                   cost.size() * (2 + 256) + nets.size() * 16;
         };
         double searchSeconds = 0.0, workerSearchSeconds = 0.0;
         int parallelBatches = 0, maxActiveSearches = 0;

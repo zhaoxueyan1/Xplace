@@ -16,7 +16,11 @@ void CPURouter::markOverflowNets(const std::vector<GrNet>& nets) {
         if (excess > 0) {
             overflowWire[idx] = 1;
             ++qor.overflowWireResourceCount;
-            qor.overflowWireExcess += excess;
+            // Keep the original RRR score precision, independently of the
+            // float comparison used by the legacy overflow map.
+            qor.overflowWireExcess += std::max(0.0,
+                static_cast<double>(routeState.wires()[idx]) + fixed[idx] +
+                twoCellsViaUsage(idx) - capacity[idx]);
         }
     }
     for (int idx = 0; idx < (LAYER - 1) * N * N; ++idx) {

@@ -368,12 +368,12 @@ bool appendViaIfMissing(CpuRouteCandidate& candidate, int via) {
     return true;
 }
 
-bool appendPinGroupVias(CpuRouteCandidate& candidate,
+CpuMazeFailureReason appendPinGroupVias(CpuRouteCandidate& candidate,
                         const CpuMazeSearchView& view,
                         const GridShape& shape,
                         const std::vector<CpuMazePoint>& group) {
     if (group.empty()) {
-        return false;
+        return CpuMazeFailureReason::InvalidInput;
     }
     const int x = group.front().x;
     const int y = group.front().y;
@@ -381,22 +381,19 @@ bool appendPinGroupVias(CpuRouteCandidate& candidate,
     int maximumLayer = group.front().layer;
     for (const CpuMazePoint& point : group) {
         if (!validPoint(view, shape, point) || point.x != x || point.y != y) {
-            return false;
+            return CpuMazeFailureReason::InvalidInput;
         }
         minimumLayer = std::min(minimumLayer, point.layer);
         maximumLayer = std::max(maximumLayer, point.layer);
     }
     for (int lowerLayer = minimumLayer; lowerLayer < maximumLayer; ++lowerLayer) {
-        if (!layerEnabled(view, lowerLayer) || !layerEnabled(view, lowerLayer + 1)) {
-            return false;
-        }
         const int via = viaIndex(shape, lowerLayer, x, y);
         if (viaStepCost(view, via) >= INF_DISTANCE) {
-            return false;
+            return CpuMazeFailureReason::Unreachable;
         }
         appendViaIfMissing(candidate, via);
     }
-    return true;
+    return CpuMazeFailureReason::None;
 }
 
 CpuMazeSearchResult failure(CpuMazeFailureReason reason, int netId, std::size_t expandedStates = 0) {
@@ -469,9 +466,8 @@ CpuMazeSearchResult CpuMazeRouter::route(const CpuMazeNet& net,
         result.candidate.netId = net.netId;
         result.candidate.status = CpuRouteStatus::Routed;
         result.candidate.rawRoute = {1};
-        if (!appendPinGroupVias(result.candidate, view, shape, net.pinGroups.front())) {
-            return failure(CpuMazeFailureReason::InvalidInput, net.netId);
-        }
+        const auto access = appendPinGroupVias(result.candidate, view, shape, net.pinGroups.front());
+        if (access != CpuMazeFailureReason::None) return failure(access, net.netId);
         std::vector<int> connected;
         connected.reserve(net.pinGroups.front().size());
         for (const CpuMazePoint& point : net.pinGroups.front()) {
@@ -508,8 +504,10 @@ CpuMazeSearchResult CpuMazeRouter::route(const CpuMazeNet& net,
                 return failure(CpuMazeFailureReason::Unreachable, net.netId, result.expandedStates);
             }
             appendPath(result.candidate, path.nodes, shape);
-            if (branch.pinAccess && !appendPinGroupVias(result.candidate, view, shape, branch.targets)) {
-                return failure(CpuMazeFailureReason::InvalidInput, net.netId, result.expandedStates);
+            if (branch.pinAccess) {
+                const auto access = appendPinGroupVias(result.candidate, view, shape, branch.targets);
+                if (access != CpuMazeFailureReason::None)
+                    return failure(access, net.netId, result.expandedStates);
             }
             connected.insert(connected.end(), path.nodes.begin(), path.nodes.end());
             if (branch.pinAccess) {

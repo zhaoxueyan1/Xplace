@@ -30,7 +30,7 @@ CpuMazeBatchRouter::CpuMazeBatchRouter(const CpuMazeSearchView& view, int reques
       nodeCount_(cpuMazeGridSize(view)),
       // 44 bytes/node for fixed scratch and a bounded heap. Reserve additional
       // space for path/tree/target containers and one in-flight candidate.
-      scratchBytes_(multiply(nodeCount_, 192)), reservedBytes_(0) {
+      scratchBytes_(multiply(nodeCount_, 256)), reservedBytes_(0) {
     if (requestedWorkers <= 0 || maxBatchSize < 0)
         throw std::invalid_argument("invalid CPU maze batch workers or size");
 }
@@ -50,7 +50,8 @@ CpuMazeBatchResult CpuMazeBatchRouter::search(const std::vector<CpuMazeNet>& net
         maxNetBytes = std::max(maxNetBytes, bytes);
     }
     // Bound retained raw route/delta vectors including their growth capacity.
-    const auto pendingBytes = multiply(nodeCount_, multiply(nets.size(), 64));
+    const auto pendingBytes = add(multiply(nodeCount_, multiply(nets.size(), 64)),
+        multiply(nets.size(), sizeof(CpuMazeSearchResult) + sizeof(double)));
     reservedBytes_ = add(add(sharedBytes, netBytes), pendingBytes);
     const auto workerBytes = add(scratchBytes_, multiply(maxNetBytes, 2));
     const auto nextLimit = chooseCpuRouteWorkers(requestedWorkers_, maxBatchSize_, workerBytes, reservedBytes_);

@@ -258,11 +258,11 @@ int main() {
     assert(router.route(ladder, view).succeeded());
     std::fill(blockedVia.begin(), blockedVia.end(), 1);
     assert(!router.route(transition, view).succeeded());
-    assert(!router.route(ladder, view).succeeded());
+    assert(router.route(ladder, view).failureReason == gr::CpuMazeFailureReason::Unreachable);
     std::fill(blockedVia.begin(), blockedVia.end(), 0);
     std::fill(viaCost.begin(), viaCost.end(), -1);
     assert(!router.route(transition, view).succeeded());
-    assert(!router.route(ladder, view).succeeded());
+    assert(router.route(ladder, view).failureReason == gr::CpuMazeFailureReason::Unreachable);
     std::fill(viaCost.begin(), viaCost.end(), 1);
 
     // Repeated decreases retain only one heap entry per node and preserve ties.
