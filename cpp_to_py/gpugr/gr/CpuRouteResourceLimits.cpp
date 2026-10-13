@@ -1,6 +1,9 @@
 #include "CpuRouteWorkerPool.h"
 
+#include "common/utils/log.h"
+
 #include <algorithm>
+#include <atomic>
 #include <filesystem>
 #include <fstream>
 #include <limits>
@@ -9,6 +12,12 @@
 
 namespace gr {
 namespace {
+
+std::size_t routeMemoryBudget(std::size_t availableBytes) {
+    // Keep the 80% policy exact without converting large byte counts through
+    // floating point or overflowing a multiplication by four.
+    return availableBytes / 5 * 4 + (availableBytes % 5) * 4 / 5;
+}
 
 std::size_t availableMemoryBytes() {
     std::ifstream meminfo("/proc/meminfo");
@@ -82,9 +91,42 @@ CpuWorkerLimit limitCpuRouteWorkers(int requestedWorkers, int maxBatchSize,
 CpuWorkerLimit chooseCpuRouteWorkers(int requestedWorkers, int maxBatchSize,
                                      std::size_t scratchBytesPerWorker,
                                      std::size_t reservedBytes) {
-    return limitCpuRouteWorkers(requestedWorkers, maxBatchSize, scratchBytesPerWorker,
-                                reservedBytes, availableMemoryBytes() / 2,
-                                availableCpus(requestedWorkers));
+    const auto available = availableMemoryBytes();
+    const auto budget = routeMemoryBudget(available);
+    const auto hardware = availableCpus(requestedWorkers);
+    const bool guard = maxBatchSize > 0 &&
+                       (reservedBytes > budget || scratchBytesPerWorker > budget - reservedBytes);
+    static std::atomic<bool> budgetLogged{false};
+    if (guard) {
+        utils::logger.warning(
+            "CPU routing memory guard: available=%zu budget=%zu reserved=%zu worker=%zu "
+            "requested_workers=%d max_batch=%d hardware_workers=%d policy=0.80",
+            available,
+            budget,
+            reservedBytes,
+            scratchBytesPerWorker,
+            requestedWorkers,
+            maxBatchSize,
+            hardware);
+    }
+    auto result = limitCpuRouteWorkers(requestedWorkers, maxBatchSize, scratchBytesPerWorker,
+                                       reservedBytes, budget, hardware);
+    if (reservedBytes > 0 && !budgetLogged.exchange(true)) {
+        utils::logger.info(
+            "CPU routing memory budget: available=%zu budget=%zu reserved=%zu worker=%zu "
+            "requested_workers=%d effective_workers=%d max_batch=%d hardware_workers=%d "
+            "clamp=%s policy=0.80",
+            available,
+            budget,
+            reservedBytes,
+            scratchBytesPerWorker,
+            requestedWorkers,
+            result.effectiveWorkers,
+            maxBatchSize,
+            hardware,
+            result.clampReason.c_str());
+    }
+    return result;
 }
 
 }  // namespace gr
