@@ -1,7 +1,10 @@
 #include "PatternRoute.h"
 
 #include <iostream>
+#include <chrono>
+#include <mutex>
 #include <set>
+#include <stdexcept>
 
 #include "common/db/Database.h"
 #include "common/utils/robin_hood.h"
@@ -10,6 +13,30 @@
 namespace gr {
 
 using namespace Flute;
+
+namespace {
+
+std::mutex fluteMutex;
+
+Tree runFlute(int degree,
+              DTYPE* x,
+              DTYPE* y,
+              double* waitSeconds = nullptr,
+              double* wallSeconds = nullptr) {
+    const auto waitStart = std::chrono::steady_clock::now();
+    std::unique_lock<std::mutex> lock(fluteMutex);
+    const auto callStart = std::chrono::steady_clock::now();
+    if (waitSeconds) {
+        *waitSeconds += std::chrono::duration<double>(callStart - waitStart).count();
+    }
+    Tree tree = flute(degree, x, y, 3);
+    if (wallSeconds) {
+        *wallSeconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - callStart).count();
+    }
+    return tree;
+}
+
+}  // namespace
 
 void prepareSingeNet(gr::GrNet &grNet, int routesOffset, int X, int Y, int N, int LAYER, int DIRECTION) {
     const std::vector<std::vector<int>> &pins = grNet.getPins();
@@ -36,10 +63,10 @@ void prepareSingeNet(gr::GrNet &grNet, int routesOffset, int X, int Y, int N, in
     // const int MAX_DEGREE = 100000;
     // if (degree > MAX_DEGREE) std::cerr << "Not Enough X and Y in Pattern Routing" << std::endl;
 
-    int x[degree * 4], y[degree * 4];
+    std::vector<int> x(degree), y(degree);
     for (auto e : loc2Pins) x[cur] = e.first / N, y[cur] = e.first % N, cur++;
 
-    Tree flutetree = flute(degree, x, y, 3);
+    Tree flutetree = runFlute(degree, x.data(), y.data());
 
     robin_hood::unordered_map<int, int> loc2node, node2loc;
     std::set<int> locations;
@@ -261,11 +288,15 @@ int prepare(double &count,
             int routesOffset,
             int *gbpoints,
             int &gbPinOffset,
+            size_t pointsCapacity,
+            size_t gbpointsCapacity,
             int X,
             int Y,
             int N,
             int LAYER,
-            int DIRECTION) {
+            int DIRECTION,
+            double *fluteWaitSeconds,
+            double *fluteWallSeconds) {
     auto &pins = grNet.getPins();
     // std::map<int, std::vector<int>> loc2Pins;
     robin_hood::unordered_map<int, std::vector<int>> loc2Pins;
@@ -293,10 +324,10 @@ int prepare(double &count,
     if (degree == 0) std::cerr << "ERROR: degree 0" << std::endl;
     constexpr int MAX_DEGREE = 100000;
     if (degree > MAX_DEGREE) std::cerr << "Not Enough X and Y in Pattern Routing" << std::endl;
-    int x[degree * 4], y[degree * 4];
+    std::vector<int> x(degree), y(degree);
     for (auto e : loc2Pins) x[cur] = e.first / N, y[cur] = e.first % N, cur++;
 
-    Tree flutetree = flute(degree, x, y, 3);
+    Tree flutetree = runFlute(degree, x.data(), y.data(), fluteWaitSeconds, fluteWallSeconds);
     // count += clock() - startTimer;
     robin_hood::unordered_map<int, int> loc2node, node2loc;
     std::set<int> locations;
@@ -444,6 +475,17 @@ int prepare(double &count,
             std::cout << std::endl;
             exit(-1);
         }
+    }
+    const size_t requiredPoints = 2 + static_cast<size_t>(6) * static_cast<size_t>(node_cnt);
+    if (requiredPoints > pointsCapacity) {
+        throw std::runtime_error(
+            "GPU pattern-routing points buffer is too small for one net (required " +
+            std::to_string(requiredPoints) + ", capacity " + std::to_string(pointsCapacity) + ")");
+    }
+    if (static_cast<size_t>(node_cnt) > gbpointsCapacity) {
+        throw std::runtime_error(
+            "GPU pattern-routing gbpoints buffer is too small for one net (required " +
+            std::to_string(node_cnt) + ", capacity " + std::to_string(gbpointsCapacity) + ")");
     }
     std::vector<int> vis(node_cnt, 0);
     points[0] = routesOffset;

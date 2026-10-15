@@ -74,6 +74,19 @@ __global__ void getCapTensor(
     }
 }
 
+__global__ void getRawWireDmdTensor(
+    torch::PackedTensorAccessor32<float, 3, torch::RestrictPtrTraits> wireMap,
+    int *wires, int N, int LAYER, int xSize, int ySize, int DIRECTION) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if(idx < LAYER * N * N && idx % N + 1 < N) {
+        int layer = idx / N / N, x = idx / N % N, y = idx % N;
+        if (!(layer & 1) ^ DIRECTION) cudaSwapInt(x, y);
+        if (layer < LAYER && x < xSize && y < ySize) {
+            wireMap[layer][x][y] = wires[idx];
+        }
+    }
+}
+
 __global__ void compGcellRouteForce(
     torch::PackedTensorAccessor32<float, 2, torch::RestrictPtrTraits> gbpin_grad,
     torch::PackedTensorAccessor32<float, 2, torch::RestrictPtrTraits> mask_map,
@@ -84,14 +97,14 @@ __global__ void compGcellRouteForce(
     torch::PackedTensorAccessor32<float, 1, torch::RestrictPtrTraits> wirelength_weights,
     torch::PackedTensorAccessor32<float, 3, torch::RestrictPtrTraits> route_gradmat,
     float grad_weight, float unit_wire_cost, float unit_via_cost,
-    int *gbpinRoutes, int *gbpin2netId, int *routes, int *routesOffset,
+    int *gbpinRoutes, int *gbpin2netId, int *routes, int64_t *routesOffset, int64_t *routeLengths,
     int numGbPin, int N, int LAYER, int xSize, int ySize, int DIRECTION
 ) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < numGbPin) {
         int netId = gbpin2netId[idx];
         routes += routesOffset[netId];
-        if (routes[0] == -1) {
+        if (routeLengths[netId] < 0) {
             // FIXME: failed PR, use floating cost instead of int cost
             return;
         }
@@ -160,6 +173,8 @@ __global__ void assignRouteForceToPlPin(
     int plPinId = blockIdx.x * blockDim.x + threadIdx.x;
     if (plPinId < numPlPin) {
         int gbPinId = plPinId2gbPinId[plPinId];
+        // Excluded or unconnected pins retain the caller's zero force.
+        if (gbPinId < 0) return;
         plpin_grad[plPinId][0] = gbpin_grad[gbPinId][0];
         plpin_grad[plPinId][1] = gbpin_grad[gbPinId][1];
     }
@@ -409,6 +424,17 @@ torch::Tensor GPURouter::getCapacityMap() {
     return capMap;
 }
 
+torch::Tensor GPURouter::getRawWireDemandMap() {
+    int xSize = X;
+    int ySize = Y;
+    torch::Tensor wireMap = torch::zeros({LAYER, xSize, ySize},
+                        torch::dtype(torch::kFloat32).device(torch::Device(torch::kCUDA, DEVICE_ID)));
+    getRawWireDmdTensor<<<BLOCK_NUMBER(LAYER * N * N), BLOCK_SIZE>>>(
+        wireMap.packed_accessor32<float, 3, torch::RestrictPtrTraits>(),
+        wires, N, LAYER, xSize, ySize, DIRECTION);
+    return wireMap;
+}
+
 torch::Tensor GPURouter::calcRouteGrad(torch::Tensor mask_map,
                                        torch::Tensor wire_dmd_map_2d,
                                        torch::Tensor via_dmd_map_2d,
@@ -425,6 +451,10 @@ torch::Tensor GPURouter::calcRouteGrad(torch::Tensor mask_map,
     // 1. compute demand map and capacity map
     // 2. compute route_gradmat for each gcell (use torchDCT)
 
+    auto node_grad = torch::zeros({num_nodes, 2},
+                        torch::dtype(torch::kFloat32).device(torch::Device(torch::kCUDA, DEVICE_ID)));
+    if (numGbPin == 0) return node_grad;
+
     // 3. compute route force for each global pin
     torch::Tensor gbpin_grad = torch::zeros({numGbPin, 2}, 
                         torch::dtype(torch::kFloat32).device(torch::Device(torch::kCUDA, DEVICE_ID)));
@@ -438,7 +468,7 @@ torch::Tensor GPURouter::calcRouteGrad(torch::Tensor mask_map,
         wirelength_weights.packed_accessor32<float, 1, torch::RestrictPtrTraits>(),
         route_gradmat.packed_accessor32<float, 3, torch::RestrictPtrTraits>(),
         grad_weight, unit_wire_cost, unit_via_cost,
-        gbpinRoutes, gbpin2netId, routes, routesOffset,
+        gbpinRoutes, gbpin2netId, routes, routesOffset, routeLengths,
         numGbPin, N, LAYER, X, Y, DIRECTION
     );
 
@@ -452,7 +482,6 @@ torch::Tensor GPURouter::calcRouteGrad(torch::Tensor mask_map,
     );
 
     // 5. calc node grad (use deterministic summation)
-    auto node_grad = torch::zeros({num_nodes, 2}, torch::dtype(plpin_grad.dtype()).device(plpin_grad.device()));
     const int threads = 128;
     const int blocks = (num_nodes * 2 + threads - 1) / threads;
     calc_node_grad_deterministic_cuda_kernel<<<blocks, threads, 0>>>(

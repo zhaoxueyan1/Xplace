@@ -2,6 +2,18 @@ import torch
 from .database import PlaceData
 from cpp_to_py import density_map_cuda
 from .core import merged_wl_loss_grad, merged_wl_loss_grad_timing
+from utils.visualization import save_initial_density_map
+
+
+def _maybe_plot_initial_density_map(init_density_map, args, logger, tag):
+    if not getattr(args, "plot_initial_density_map", False):
+        return
+    paths = save_initial_density_map(init_density_map, args, tag=tag)
+    logger.info(
+        "Saved initial density map plot: %s (raw map: %s)",
+        paths["png"],
+        paths["npy"],
+    )
 
 
 def get_init_density_map(rawdb, gpdb, data: PlaceData, args, logger, ps=None):
@@ -13,6 +25,12 @@ def get_init_density_map(rawdb, gpdb, data: PlaceData, args, logger, ps=None):
     )
     if lhs == rhs and (ps is None or not ps.zero_macro_grad):
         data.init_density_map = zeros_density_map
+        _maybe_plot_initial_density_map(
+            data.init_density_map,
+            args,
+            logger,
+            tag="initial",
+        )
         return zeros_density_map
     # get fix nodes which are located inside die
     node_pos = data.node_pos[lhs:rhs]
@@ -99,6 +117,8 @@ def get_init_density_map(rawdb, gpdb, data: PlaceData, args, logger, ps=None):
             iopin_density_map = iopin_density_map.contiguous() * max(4 - 1, 0)
             init_density_map += iopin_density_map
     data.init_density_map = init_density_map
+    tag = "initial_stdcell" if ps is not None and ps.zero_macro_grad else "initial"
+    _maybe_plot_initial_density_map(data.init_density_map, args, logger, tag=tag)
     return data.init_density_map
 
 

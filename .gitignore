@@ -3,7 +3,8 @@
 .vscode/
 __pycache__/
 *.so
-build/
+build*/
+build_cpu_pr/
 *.log
 *.npy
 *.csv
@@ -15,3 +16,5 @@ data/cad
 data/raw
 misc
 .venv/
+.codex
+.codex/

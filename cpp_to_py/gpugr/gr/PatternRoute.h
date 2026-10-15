@@ -1,4 +1,6 @@
 #pragma once
+#include <cstddef>
+
 #include "common/common.h"
 #include "gpugr/db/GrNet.h"
 
@@ -10,11 +12,15 @@ int prepare(double &count,
             int routesOffset,
             int *gbpoints,
             int &gbPinOffset,
+            size_t pointsCapacity,
+            size_t gbpointsCapacity,
             int X,
             int Y,
             int N,
             int LAYER,
-            int DIRECTION);
+            int DIRECTION,
+            double *fluteWaitSeconds = nullptr,
+            double *fluteWallSeconds = nullptr);
 
 void prepareSingeNet(gr::GrNet &grNet, int routesOffset, int X, int Y, int N, int LAYER, int DIRECTION);
 
@@ -34,16 +40,22 @@ void patternRoute(int *points,
                   int batchSize,
                   int64_t *wireCostSum,
                   int *viaCost,
-                  int *map,
+                  int64_t *map,
                   int *prev,
                   int *wires,
                   int *vias,
                   int *routes,
+                  int64_t *batchRouteOffsets,
+                  int64_t *batchRouteCapacities,
+                  int64_t *batchRouteLengths,
+                  int *batchRouteOverflows,
                   int *gbpoints,
                   int *gbpinRoutes,
                   int X,
                   int Y,
                   int N,
                   int LAYER,
-                  int DIRECTION);
+                  int DIRECTION,
+                  int routingLayerBegin,
+                  int routingLayerEnd);
 }  // namespace gr

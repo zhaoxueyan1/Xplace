@@ -1,14 +1,18 @@
+import copy
+import json
+import math
+import os
+
+import matplotlib.pyplot as plt
+import numpy as np
+import seaborn as sns
 import torch
+import torchvision.transforms
 from cpp_to_py import gpugr
+
 from .dct2_fft2 import dct2, idct2, idxst_idct, idct_idxst
 from .torch_dct import torch_dct_idct
-import numpy as np
-import math
-import matplotlib.pyplot as plt
-import seaborn as sns
-import os
-import copy
-import torchvision.transforms
+from utils.logger import append_gr_run_params
 
 
 class RouteCache:
@@ -77,6 +81,116 @@ def draw_cg_fig(args, t: torch.Tensor, info, title):
     plt.close()
 
 
+def _summarize_map_tensor(tensor: torch.Tensor, overflow_threshold: float = 0.0):
+    flat = tensor.detach().reshape(-1).to(dtype=torch.float32)
+    if flat.numel() == 0:
+        return {
+            "max": 0.0,
+            "mean": 0.0,
+            "std": 0.0,
+            "overflow_bin_ratio": 0.0,
+        }
+    return {
+        "max": float(flat.max().item()),
+        "mean": float(flat.mean().item()),
+        "std": float(flat.std().item()),
+        "overflow_bin_ratio": float((flat > float(overflow_threshold)).to(dtype=torch.float32).mean().item()),
+    }
+
+
+def _save_map_png(png_path: str, tensor: torch.Tensor, title: str, clamp_max: float = None):
+    image = tensor.detach().cpu()
+    if image.dim() == 3:
+        image = image.sum(dim=0)
+    image = image.t().flip(0).numpy()
+    if clamp_max is not None:
+        image = np.minimum(image, float(clamp_max))
+
+    ratio = image.shape[1] / max(image.shape[0], 1)
+    plt.figure(figsize=(6, 5 * ratio))
+    plt.imshow(image, origin="lower", aspect="auto", cmap="YlGnBu")
+    plt.colorbar()
+    plt.title(title)
+    plt.tight_layout()
+    plt.savefig(png_path, dpi=200)
+    plt.close()
+
+
+def _sanitize_path_token(token):
+    token = str(token)
+    return token.replace("\\", "__").replace("/", "__")
+
+
+def _save_ggr_artifacts(
+    args,
+    data,
+    iteration,
+    run_tag,
+    gr_params,
+    skip_m1_route,
+    maps,
+    metrics,
+):
+    res_root = os.path.join(args.result_dir, args.exp_id)
+    design_tag = _sanitize_path_token(data.design_name)
+    run_tag_safe = _sanitize_path_token(run_tag)
+    artifact_root = os.path.join(
+        res_root,
+        "route_artifacts",
+        f"{design_tag}_iter{iteration}_{run_tag_safe}",
+    )
+    png_dir = os.path.join(artifact_root, "png")
+    os.makedirs(png_dir, exist_ok=True)
+
+    maps_np = {key: value.detach().cpu().numpy() for key, value in maps.items()}
+    maps_path = os.path.join(artifact_root, f"{design_tag}_ggr_maps.npz")
+    os.makedirs(os.path.dirname(maps_path), exist_ok=True)
+    np.savez_compressed(maps_path, **maps_np)
+
+    metrics_path = os.path.join(artifact_root, f"{design_tag}_ggr_metrics.json")
+    os.makedirs(os.path.dirname(metrics_path), exist_ok=True)
+    artifact_metrics = dict(metrics)
+    artifact_metrics.update(
+        {
+            "design_name": data.design_name,
+            "run_tag": run_tag,
+            "iteration": int(iteration),
+            "skip_m1_route": bool(skip_m1_route),
+            "route_xSize": int(gr_params.get("route_xSize", 0)),
+            "route_ySize": int(gr_params.get("route_ySize", 0)),
+            "rrrIters": int(gr_params.get("rrrIters", 0)),
+            "bottom_routing_layer": str(gr_params.get("bottom_routing_layer", "")),
+            "top_routing_layer": str(gr_params.get("top_routing_layer", "")),
+            "maps_path": maps_path,
+            "png_dir": png_dir,
+        }
+    )
+    with open(metrics_path, "w", encoding="utf-8") as f_metrics:
+        json.dump(artifact_metrics, f_metrics, indent=2)
+
+    png_specs = (
+        ("cg_map_union_overflow", "cg_map_union_overflow", "Union Overflow", 3.0),
+        ("cg_map_h_overflow", "cg_map_h_overflow", "Horizontal Overflow", 3.0),
+        ("cg_map_v_overflow", "cg_map_v_overflow", "Vertical Overflow", 3.0),
+        ("cg_map_union_raw", "cg_map_union_raw", "Union Raw Congestion", None),
+        ("cg_map_h_raw", "cg_map_h_raw", "Horizontal Raw Congestion", None),
+        ("cg_map_v_raw", "cg_map_v_raw", "Vertical Raw Congestion", None),
+        ("capacity_map", "capacity_sum", "Capacity Sum", None),
+        ("dmd_map", "demand_sum", "Demand Sum", None),
+        ("wire_demand_map", "wire_demand_sum", "Wire Demand Sum", None),
+        ("via_demand_map", "via_demand_sum", "Via Demand Sum", None),
+        ("raw_wire_demand_map", "raw_wire_demand_sum", "Raw Wire Demand Sum", None),
+        ("fix_usage_map", "fix_usage_sum", "Fixed Usage Sum", None),
+        ("mov_usage_map", "mov_usage_sum", "Movable Usage Sum", None),
+    )
+    for key, suffix, title, clamp_max in png_specs:
+        png_path = os.path.join(png_dir, f"{design_tag}_{suffix}.png")
+        os.makedirs(os.path.dirname(png_path), exist_ok=True)
+        _save_map_png(png_path, maps[key], title, clamp_max=clamp_max)
+
+    return artifact_root, metrics_path
+
+
 def evaluate_routability(args, logger, cg_mapHV: torch.Tensor):
     # compute RC
     ace_list = [0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5]
@@ -102,6 +216,43 @@ def calc_gr_wl_via(grdb, routeforce):
     gr_wirelength = gr_wirelength * max(step_x, step_y) / layer_m2_pitch
     
     return gr_wirelength, gr_numVias
+
+
+def _aggregate_routing_layers(demand_map, capacity_map, layer_ids):
+    if layer_ids.numel() == 0:
+        return torch.zeros_like(demand_map[0])
+    demand = demand_map.index_select(0, layer_ids).sum(dim=0)
+    capacity = capacity_map.index_select(0, layer_ids).sum(dim=0)
+    floor = torch.finfo(capacity.dtype).eps
+    return torch.where(
+        capacity > floor,
+        demand / capacity.clamp(min=floor),
+        torch.zeros_like(demand),
+    )
+
+
+def _routing_layer_metadata(routeforce, layer_count):
+    default_range = (0, max(0, int(layer_count) - 1))
+    getter = getattr(routeforce, "routing_layer_range", None)
+    if not callable(getter):
+        return default_range, []
+    raw_range = getter()
+    if raw_range is None or len(raw_range) != 2:
+        raise RuntimeError("Invalid GGR routing layer range: %r" % (raw_range,))
+    begin, end = int(raw_range[0]), int(raw_range[1])
+    if begin < 0 or end >= int(layer_count) or begin > end:
+        raise RuntimeError(
+            "GGR routing layer range [%d, %d] is invalid for %d layers"
+            % (begin, end, int(layer_count))
+        )
+    names_getter = getattr(routeforce, "routing_layer_names", None)
+    names = list(names_getter()) if callable(names_getter) else []
+    if names and len(names) != int(layer_count):
+        raise RuntimeError(
+            "GGR routing layer name count does not match map layer count: %d != %d"
+            % (len(names), int(layer_count))
+        )
+    return (begin, end), names
 
 def estimate_num_shorts(routeforce, gpdb, cap_map, wire_dmd_map, via_dmd_map):
     step_x, step_y = routeforce.gcell_steps()
@@ -258,7 +409,7 @@ def run_gr_and_fft_main(
     return output
 
 
-def run_gr_and_fft(args, logger, data, rawdb, gpdb, ps, grdb=None, skip_m1_route=True, run_fft=False, visualize=False, report_gr_metrics_only=False, given_gr_params={}):
+def run_gr_and_fft(args, logger, data, rawdb, gpdb, ps, grdb=None, skip_m1_route=True, run_fft=False, visualize=False, report_gr_metrics_only=False, given_gr_params={}, run_tag="route_force"):
     route_size = min(512, args.num_bin_y)
     iteration = ps.iter - 1  # ps.iter is increased before running GR optimization
     die_ratio = (data.__ori_die_hx__ - data.__ori_die_lx__) / (data.__ori_die_hy__ - data.__ori_die_ly__)
@@ -270,7 +421,29 @@ def run_gr_and_fft(args, logger, data, rawdb, gpdb, ps, grdb=None, skip_m1_route
         "cuda:{}".format(args.gpu) if torch.cuda.is_available() else "cpu"
     )
     gr_params = {"device_id": args.gpu, "route_xSize": route_xSize, "route_ySize": route_ySize}
+    bottom_routing_layer = getattr(args, "bottom_routing_layer", "") or ""
+    top_routing_layer = getattr(args, "top_routing_layer", "") or ""
+    if bottom_routing_layer:
+        gr_params["bottom_routing_layer"] = bottom_routing_layer
+    if top_routing_layer:
+        gr_params["top_routing_layer"] = top_routing_layer
     gr_params.update(given_gr_params)
+    append_gr_run_params(
+        args,
+        run_tag=run_tag,
+        gr_params=gr_params,
+        extra={
+            "iteration": iteration,
+            "skip_m1_route": skip_m1_route,
+            "run_fft": run_fft,
+            "visualize": visualize,
+            "report_gr_metrics_only": report_gr_metrics_only,
+            "placement_num_bin_x": data.num_bin_x,
+            "placement_num_bin_y": data.num_bin_y,
+            "route_size": route_size,
+            "die_ratio": die_ratio,
+        },
+    )
     gpugr.load_gr_params(gr_params)
 
     # 1.2) do GR
@@ -281,36 +454,75 @@ def run_gr_and_fft(args, logger, data, rawdb, gpdb, ps, grdb=None, skip_m1_route
     routeforce.run_ggr()
     logger.info("--------- End GR ---------")
 
-    m1direction = gpdb.m1direction()  # 0 for H, 1 for V, metal1's layer idx is 0
-    hId = 1 if m1direction else 0
-    vId = 0 if m1direction else 1
-    aId = 0
-    if skip_m1_route:
-        aId = 1
-        hId = hId + 2 if hId == 0 else hId
-        vId = vId + 2 if vId == 0 else vId
-
     # 1.3) calculate capacity and demand map
     dmd_map, wire_dmd_map, via_dmd_map = routeforce.dmd_map()
     cap_map: torch.Tensor = routeforce.cap_map()
+    routing_layer_range, routing_layer_names = _routing_layer_metadata(
+        routeforce, dmd_map.size(0)
+    )
+    layer_ids = torch.arange(dmd_map.size(0), device=dmd_map.device)
+    route_layers = (layer_ids >= routing_layer_range[0]) & (layer_ids <= routing_layer_range[1])
+    if skip_m1_route:
+        route_layers &= layer_ids != 0
+    layer_mask = route_layers.view(-1, 1, 1)
+    dmd_map = torch.where(layer_mask, dmd_map, torch.zeros_like(dmd_map))
+    wire_dmd_map = torch.where(layer_mask, wire_dmd_map, torch.zeros_like(wire_dmd_map))
+    via_dmd_map = torch.where(layer_mask, via_dmd_map, torch.zeros_like(via_dmd_map))
+    cap_map = torch.where(layer_mask, cap_map, torch.zeros_like(cap_map))
+    m1direction = gpdb.m1direction()  # 0 for H, 1 for V, metal1's layer idx is 0
+    h_id = 1 if m1direction else 0
+    v_id = 0 if m1direction else 1
+    if skip_m1_route:
+        if h_id == 0:
+            h_id += 2
+        if v_id == 0:
+            v_id += 2
+    h_ids = torch.nonzero(route_layers & ((layer_ids % 2) == (h_id % 2)), as_tuple=False).flatten()
+    v_ids = torch.nonzero(route_layers & ((layer_ids % 2) == (v_id % 2)), as_tuple=False).flatten()
+    union_ids = torch.nonzero(route_layers, as_tuple=False).flatten()
+    save_ggr_artifacts = bool(getattr(args, "save_ggr_artifacts", False))
+    raw_wire_dmd_map = None
+    fix_usage_map = None
+    mov_usage_map = None
+    if visualize or save_ggr_artifacts:
+        raw_wire_dmd_map = routeforce.raw_wire_dmd_map()
+        fix_usage_map = routeforce.fix_usage_map()
+        mov_usage_map = routeforce.mov_usage_map()
+        raw_wire_dmd_map = torch.where(
+            layer_mask, raw_wire_dmd_map, torch.zeros_like(raw_wire_dmd_map)
+        )
+        fix_usage_map = torch.where(layer_mask, fix_usage_map, torch.zeros_like(fix_usage_map))
+        mov_usage_map = torch.where(layer_mask, mov_usage_map, torch.zeros_like(mov_usage_map))
 
-    dmd_map2d: torch.Tensor = dmd_map[aId:].sum(dim=0)
-    wire_dmd_map2d: torch.Tensor = wire_dmd_map[aId:].sum(dim=0)
-    via_dmd_map2d: torch.Tensor = via_dmd_map[aId:].sum(dim=0)
-    cap_map2d: torch.Tensor = cap_map[aId:].sum(dim=0)
+    if union_ids.numel():
+        dmd_map2d: torch.Tensor = dmd_map.index_select(0, union_ids).sum(dim=0)
+        wire_dmd_map2d: torch.Tensor = wire_dmd_map.index_select(0, union_ids).sum(dim=0)
+        via_dmd_map2d: torch.Tensor = via_dmd_map.index_select(0, union_ids).sum(dim=0)
+        cap_map2d: torch.Tensor = cap_map.index_select(0, union_ids).sum(dim=0)
+    else:
+        dmd_map2d = torch.zeros_like(dmd_map[0])
+        wire_dmd_map2d = torch.zeros_like(wire_dmd_map[0])
+        via_dmd_map2d = torch.zeros_like(via_dmd_map[0])
+        cap_map2d = torch.zeros_like(cap_map[0])
 
-    cg_mapAll = dmd_map2d / cap_map2d  # ignore metal0
+    cg_mapAll = _aggregate_routing_layers(dmd_map, cap_map, union_ids)
 
     # input_mat = cg_mapAll
     input_mat = torch.where(cg_mapAll > 1, cg_mapAll - 1, 0)
     # input_mat = torch.log(input_mat + 1)
 
-    cg_mapH = dmd_map[hId::2].sum(dim=0) / cap_map[hId::2].sum(dim=0)
-    cg_mapV = dmd_map[vId::2].sum(dim=0) / cap_map[vId::2].sum(dim=0)
+    cg_mapH = _aggregate_routing_layers(dmd_map, cap_map, h_ids)
+    cg_mapV = _aggregate_routing_layers(dmd_map, cap_map, v_ids)
     cg_mapHV = torch.stack((cg_mapH, cg_mapV))
     cg_mapHV = torch.where(cg_mapHV > 1, cg_mapHV - 1, 0)
 
-    cgOvfl = (dmd_map[aId:] / cap_map[aId:]).max(dim=0)[0].clamp(min=1.0) - 1
+    if union_ids.numel():
+        layer_ratios = dmd_map.index_select(0, union_ids) / cap_map.index_select(
+            0, union_ids
+        ).clamp(min=torch.finfo(cap_map.dtype).eps)
+        cgOvfl = layer_ratios.max(dim=0)[0].clamp(min=1.0) - 1
+    else:
+        cgOvfl = torch.zeros_like(cg_mapAll)
     map_raw = (dmd_map, wire_dmd_map, via_dmd_map, cap_map)
     map_2d = (dmd_map2d, wire_dmd_map2d, via_dmd_map2d, cap_map2d)
 
@@ -381,6 +593,67 @@ def run_gr_and_fft(args, logger, data, rawdb, gpdb, ps, grdb=None, skip_m1_route
         draw_cg_fig(args, cg_mapHV[1], (data.design_name, iteration, "cg_mapV"), title)
         # draw_cg_fig(args, route_gradmat[0], (data.design_name, iteration, "route_gradmatX"), title)
         # draw_cg_fig(args, route_gradmat[1], (data.design_name, iteration, "route_gradmatY"), title)
+
+    if visualize or save_ggr_artifacts:
+        raw_wire_dmd_map = raw_wire_dmd_map if raw_wire_dmd_map is not None else routeforce.raw_wire_dmd_map()
+        fix_usage_map = fix_usage_map if fix_usage_map is not None else routeforce.fix_usage_map()
+        mov_usage_map = mov_usage_map if mov_usage_map is not None else routeforce.mov_usage_map()
+        artifact_maps = {
+            "cg_map_union_overflow": input_mat,
+            "cg_map_h_overflow": cg_mapHV[0],
+            "cg_map_v_overflow": cg_mapHV[1],
+            "cg_map_union_raw": cg_mapAll,
+            "cg_map_h_raw": cg_mapH,
+            "cg_map_v_raw": cg_mapV,
+            "dmd_map": dmd_map,
+            "wire_demand_map": wire_dmd_map,
+            "via_demand_map": via_dmd_map,
+            "capacity_map": cap_map,
+            "raw_wire_demand_map": raw_wire_dmd_map,
+            "fix_usage_map": fix_usage_map,
+            "mov_usage_map": mov_usage_map,
+        }
+        artifact_metrics = {
+            "num_overflow_nets": int(numOvflNets),
+            "gr_wirelength": float(gr_wirelength),
+            "gr_num_vias": float(gr_numVias),
+            "gr_est_shorts": float(gr_numShorts),
+            "rc_hor_mean": float(rc_hor_mean),
+            "rc_ver_mean": float(rc_ver_mean),
+            "cg_map_union_overflow_stats": _summarize_map_tensor(input_mat, overflow_threshold=0.0),
+            "cg_map_h_overflow_stats": _summarize_map_tensor(cg_mapHV[0], overflow_threshold=0.0),
+            "cg_map_v_overflow_stats": _summarize_map_tensor(cg_mapHV[1], overflow_threshold=0.0),
+            "cg_map_union_raw_stats": _summarize_map_tensor(cg_mapAll, overflow_threshold=1.0),
+            "cg_map_h_raw_stats": _summarize_map_tensor(cg_mapH, overflow_threshold=1.0),
+            "cg_map_v_raw_stats": _summarize_map_tensor(cg_mapV, overflow_threshold=1.0),
+            "routing_layer_begin": int(routing_layer_range[0]),
+            "routing_layer_end": int(routing_layer_range[1]),
+            "routing_layer_names": [str(name) for name in routing_layer_names],
+            "enabled_routing_layer_names": [
+                str(name)
+                for name in routing_layer_names[
+                    routing_layer_range[0] : routing_layer_range[1] + 1
+                ]
+            ] if routing_layer_names else [],
+        }
+        artifact_root, metrics_path = _save_ggr_artifacts(
+            args=args,
+            data=data,
+            iteration=iteration,
+            run_tag=run_tag,
+            gr_params=gr_params,
+            skip_m1_route=skip_m1_route,
+            maps=artifact_maps,
+            metrics=artifact_metrics,
+        )
+        logger.info(
+            "Saved Xplace GGR artifacts for %s iter=%d run_tag=%s at %s (metrics: %s)",
+            data.design_name,
+            iteration,
+            run_tag,
+            artifact_root,
+            metrics_path,
+        )
 
     if report_gr_metrics_only:
         return gr_metrics

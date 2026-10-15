@@ -1108,15 +1108,23 @@ int readLefPin(lefrCallbackType_e c, lefiPin* pin, lefiUserData ud) {
 
     PinType* pintype = celltype->addPin(name, direction, type);
 
+    if (pin->numPorts() == 0) {
+        return 0;
+    }
+
     std::set<Point> nodes;
     Layer* layer = nullptr;
     lefiGeomRect* rect = nullptr;
     lefiGeomPolygon* polygon = nullptr;
     lefiGeometries* geom = pin->port(0);
+    if (geom == nullptr) {
+        return 0;
+    }
     vector<std::pair<int, int>> poly;
     unsigned bj = 0;
     bool has45 = false;
-    for (unsigned i = 0; i != (unsigned)geom->numItems(); ++i) {
+    const int num_items = geom->numItems();
+    for (int i = 0; i < num_items; ++i) {
         switch (geom->itemType(i)) {
             case lefiGeomUnknown:
                 logger.warning("lefiGeomUnknown: %s.%s", celltype->name.c_str(), name.c_str());
@@ -1876,8 +1884,14 @@ int readDefNet(defrCallbackType_e c, defiNet* dnet, defiUserData ud) {
             IOPin* iopin = db->getIOPin(iopinname);
             if (!iopin) {
                 logger.warning("IO pin is not defined: %s", iopinname.c_str());
+                continue;
             }
             pin = iopin->pin;
+            if (!pin) {
+                string netName(dnet->name());
+                logger.warning("IO pin has no backing pin: %s %s", netName.c_str(), iopinname.c_str());
+                continue;
+            }
             if (pin->is_connected) {
                 string netName(dnet->name());
                 logger.warning("IO Pin is re-connected: %s %s", netName.c_str(), iopinname.c_str());
@@ -1890,11 +1904,13 @@ int readDefNet(defrCallbackType_e c, defiNet* dnet, defiUserData ud) {
             Cell* cell = db->getCell(cellname);
             if (!cell) {
                 logger.warning("Cell is not defined: %s", cellname.c_str());
+                continue;
             }
             pin = cell->pin(pinname);
             if (!pin) {
                 string netName(dnet->name());
                 logger.warning("Pin is not defined: %s %s %s", netName.c_str(), cellname.c_str(), pinname.c_str());
+                continue;
             }
             if (pin->is_connected) {
                 string netName(dnet->name());

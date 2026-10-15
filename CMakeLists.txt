@@ -1,10 +1,8 @@
 cmake_minimum_required(VERSION 3.24)
 
-if (NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
-  set(CMAKE_CUDA_ARCHITECTURES 80 86 CACHE STRING "CUDA architectures" FORCE)
-endif()
+option(XPLACE_ENABLE_CUDA "Build Xplace CUDA extension targets when CUDA-capable Torch is available" ON)
 
-project(xplace LANGUAGES C CXX CUDA)
+project(xplace LANGUAGES C CXX)
 
 if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Release)
@@ -17,23 +15,55 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 message(STATUS PROJECT_SOURCE_DIR=${PROJECT_SOURCE_DIR})
 set(PATH_THIRDPARTY_ROOT ${PROJECT_SOURCE_DIR}/thirdparty)
-set(XPLACE_LIB_DIR ${PROJECT_SOURCE_DIR}/cpp_to_py/cpybin)
-
+set(
+  XPLACE_LIB_DIR
+  "${PROJECT_SOURCE_DIR}/cpp_to_py/cpybin"
+  CACHE PATH "Directory where Xplace Python extensions are installed"
+)
 set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
-set(CMAKE_INSTALL_RPATH ${XPLACE_LIB_DIR})
-
-# set _GLIBCXX_USE_CXX11_ABI for torch
-if(NOT CMAKE_CXX_ABI)
-    set(CMAKE_CXX_ABI 0 CACHE STRING
-        "Choose the value for _GLIBCXX_USE_CXX11_ABI, options are: 0|1."
-        FORCE)
-endif(NOT CMAKE_CXX_ABI)
-message(STATUS "CMAKE_CXX_ABI: _GLIBCXX_USE_CXX11_ABI=${CMAKE_CXX_ABI}")
-add_definitions(-D_GLIBCXX_USE_CXX11_ABI=${CMAKE_CXX_ABI})
+set(CMAKE_INSTALL_RPATH "$ORIGIN")
 
 # PyBind11
 add_subdirectory(${PATH_THIRDPARTY_ROOT}/pybind11)
+# pybind11's Python discovery uses the modern ``Python_*`` variables while
+# the legacy Xplace targets consume ``PYTHON_INCLUDE_DIRS``. Bridge both so
+# every Torch/pybind target sees Python.h in a clean build.
+if(NOT PYTHON_INCLUDE_DIRS)
+  if(Python_INCLUDE_DIRS)
+    set(PYTHON_INCLUDE_DIRS ${Python_INCLUDE_DIRS})
+  elseif(Python_INCLUDE_DIR)
+    set(PYTHON_INCLUDE_DIRS ${Python_INCLUDE_DIR})
+  endif()
+endif()
 message(STATUS "PYTHON_INCLUDE_DIRS: ${PYTHON_INCLUDE_DIRS}")
+
+# Match Torch's C++ standard-library ABI in a clean build. Keep an explicit
+# CMAKE_CXX_ABI override for toolchains that intentionally use a different
+# libtorch build.
+if(NOT DEFINED CMAKE_CXX_ABI OR "${CMAKE_CXX_ABI}" STREQUAL "")
+  set(_XPLACE_PYTHON_EXECUTABLE "${Python_EXECUTABLE}")
+  if(NOT _XPLACE_PYTHON_EXECUTABLE)
+    set(_XPLACE_PYTHON_EXECUTABLE "${PYTHON_EXECUTABLE}")
+  endif()
+  execute_process(
+    COMMAND "${_XPLACE_PYTHON_EXECUTABLE}" -c "import torch; print(int(torch.compiled_with_cxx11_abi()))"
+    RESULT_VARIABLE _XPLACE_TORCH_ABI_RESULT
+    OUTPUT_VARIABLE _XPLACE_TORCH_ABI
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET
+  )
+  if(_XPLACE_TORCH_ABI_RESULT EQUAL 0 AND _XPLACE_TORCH_ABI MATCHES "^[01]$")
+    set(CMAKE_CXX_ABI "${_XPLACE_TORCH_ABI}" CACHE STRING
+        "Choose the value for _GLIBCXX_USE_CXX11_ABI, options are: 0|1."
+        FORCE)
+  else()
+    set(CMAKE_CXX_ABI 0 CACHE STRING
+        "Choose the value for _GLIBCXX_USE_CXX11_ABI, options are: 0|1."
+        FORCE)
+  endif()
+endif()
+message(STATUS "CMAKE_CXX_ABI: _GLIBCXX_USE_CXX11_ABI=${CMAKE_CXX_ABI}")
+add_definitions(-D_GLIBCXX_USE_CXX11_ABI=${CMAKE_CXX_ABI})
 
 # Flute
 add_subdirectory(${PATH_THIRDPARTY_ROOT}/flute)
@@ -52,23 +82,9 @@ find_package(Cairo)
 message(STATUS "CAIRO_INCLUDE_DIRS: ${CAIRO_INCLUDE_DIRS}")
 message(STATUS "CAIRO_LIBRARIES: ${CAIRO_LIBRARIES}")
 
-# CUDA
-message(STATUS "CMAKE_CUDA_ARCHITECTURES: ${CMAKE_CUDA_ARCHITECTURES}")
-find_package(CUDAToolkit)
-
-# set nvcc flags
-set(CUDA_USE_STATIC_CUDA_RUNTIME OFF)
-set(CMAKE_CUDA17_EXTENSION_COMPILE_OPTION "-std=c++17")
-list(APPEND BASIC_CUDA_FLAGS --compiler-options;-fPIC;-std=c++17)
-list(APPEND BASIC_CUDA_FLAGS --expt-relaxed-constexpr) # suppress warning from pytorch
-message(STATUS "BASIC_CUDA_FLAGS: ${BASIC_CUDA_FLAGS}")
-add_compile_options(
-  "$<$<COMPILE_LANGUAGE:CUDA>:${BASIC_CUDA_FLAGS}>"
-)
-
 # Torch
 execute_process(COMMAND ${PYTHON_EXECUTABLE} -c 
-  "import torch; print(torch.__path__[0]); print(int(torch.cuda.is_available())); print(torch.__version__);" 
+  "import torch; print(torch.__path__[0]); print(int(torch.backends.cuda.is_built() and torch.version.cuda is not None)); print(torch.__version__);" 
   OUTPUT_VARIABLE TORCH_OUTPUT OUTPUT_STRIP_TRAILING_WHITESPACE)
 string(REPLACE "\n" ";" TORCH_OUTPUT_LIST ${TORCH_OUTPUT})
 list(GET TORCH_OUTPUT_LIST 0 TORCH_INSTALL_PREFIX)
@@ -80,8 +96,25 @@ list(GET TORCH_VERSION_LIST 1 TORCH_VERSION_MINOR)
 message(STATUS TORCH_INSTALL_PREFIX=${TORCH_INSTALL_PREFIX})
 message(STATUS TORCH_VERSION=${TORCH_VERSION_MAJOR}.${TORCH_VERSION_MINOR})
 message(STATUS TORCH_ENABLE_CUDA=${TORCH_ENABLE_CUDA})
-if (NOT TORCH_ENABLE_CUDA)
-  message(FATAL_ERROR "Xplace only supports Torch-CUDA mode, exit CMAKE." )
+
+if (XPLACE_ENABLE_CUDA AND TORCH_ENABLE_CUDA)
+  if (NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+    set(CMAKE_CUDA_ARCHITECTURES 80 86 CACHE STRING "CUDA architectures" FORCE)
+  endif()
+  enable_language(CUDA)
+  find_package(CUDAToolkit REQUIRED)
+  set(CUDA_USE_STATIC_CUDA_RUNTIME OFF)
+  set(CMAKE_CUDA17_EXTENSION_COMPILE_OPTION "-std=c++17")
+  list(APPEND BASIC_CUDA_FLAGS --compiler-options;-fPIC;-std=c++17)
+  list(APPEND BASIC_CUDA_FLAGS --expt-relaxed-constexpr)
+  message(STATUS "CMAKE_CUDA_ARCHITECTURES: ${CMAKE_CUDA_ARCHITECTURES}")
+  message(STATUS "BASIC_CUDA_FLAGS: ${BASIC_CUDA_FLAGS}")
+  add_compile_options(
+    "$<$<COMPILE_LANGUAGE:CUDA>:${BASIC_CUDA_FLAGS}>"
+  )
+else()
+  set(TORCH_ENABLE_CUDA 0)
+  message(STATUS "Xplace CUDA targets disabled; building CPU-compatible targets only")
 endif()
 
 # set torch lib

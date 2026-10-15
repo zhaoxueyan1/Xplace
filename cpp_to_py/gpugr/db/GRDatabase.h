@@ -2,6 +2,7 @@
 #include "GrNet.h"
 #include "common/common.h"
 #include "GRSetting.h"
+#include <string>
 
 namespace db {
 class Database;
@@ -34,6 +35,12 @@ public:
 
 class GRDatabase {
 public:
+    struct SetupProfileRecord {
+        std::string name;
+        double elapsedMs = 0.0;
+        std::vector<std::pair<std::string, long long>> fields;
+    };
+
     db::Database& rawdb;
     gp::GPDatabase& gpdb;
 
@@ -51,6 +58,10 @@ public:
 
     // Design
     int nLayers;
+    // Inclusive indices into the LEF routing-layer stack. Layers outside this
+    // interval remain in the tensors for stable indexing but are unroutable.
+    int routingLayerBegin = 0;
+    int routingLayerEnd = -1;
     int xSize;
     int ySize;
     int nMaxGrid;
@@ -77,6 +88,7 @@ public:
 
     std::vector<GrNet> grNets;
     std::vector<int> gpdbPinId2gbPinId;
+    std::vector<SetupProfileRecord> setupProfileRecords;
 
     GRDatabase(std::shared_ptr<db::Database> rawdb_, std::shared_ptr<gp::GPDatabase> gpdb_);
     ~GRDatabase();
@@ -89,15 +101,26 @@ public:
     void addMovObs();
     void updateUsageLength();
     void setupObs();
+    const std::vector<SetupProfileRecord>& getSetupProfileRecords() const { return setupProfileRecords; }
+    void clearSetupProfileRecords() { setupProfileRecords.clear(); }
+    void appendSetupProfileRecord(std::string name,
+                                  double elapsedMs,
+                                  std::vector<std::pair<std::string, long long>> fields = {});
 
     void setupGrNets();
     void resetGrNetsRoute();
     void resetGrNets() { grNets.clear(); };
 
+    bool isRoutingLayerEnabled(int layer) const {
+        return routingLayerBegin <= layer && layer <= routingLayerEnd;
+    }
+    std::pair<int, int> routingLayerRange() const { return {routingLayerBegin, routingLayerEnd}; }
+    std::vector<std::string> routingLayerNames() const;
+
     std::pair<int, int> reportGRStat();
     void writeGuides(std::string outputFile);
 
-    int encodeId(int l, int x, int y);
+    int encodeId(int l, int x, int y) const;
     std::tuple<int, int, int, int> getOrientOffset(int orient, int lx, int ly, int hx, int hy);
     int getEOLSpace(int width, int l);
     int getParallelRunSpace(int l, int width, int length);

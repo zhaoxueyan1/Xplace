@@ -48,6 +48,19 @@ def get_option():
     parser.add_argument('--congest_weight', type=float, default=0, help='the weight of congested force')
     parser.add_argument('--pseudo_weight', type=float, default=0, help='the weight of pseudo net')
     parser.add_argument('--visualize_cgmap', type=str2bool, default=False, help='visualize congestion map')
+    parser.add_argument('--save_ggr_artifacts', type=str2bool, default=False, help='save Xplace GGR npz/json/png artifacts for each GR call')
+    parser.add_argument(
+        '--bottom_routing_layer',
+        type=str,
+        default='',
+        help='inclusive bottom routing-layer name for GGR',
+    )
+    parser.add_argument(
+        '--top_routing_layer',
+        type=str,
+        default='',
+        help='inclusive top routing-layer name for GGR',
+    )
 
     # timing opt params
     parser.add_argument('--timing_opt', type=str2bool, default=False, help='perform timing optimization') 
@@ -81,6 +94,7 @@ def get_option():
 
     # placement output
     parser.add_argument('--draw_placement', type=str2bool, default=False, help='draw placement') 
+    parser.add_argument('--plot_initial_density_map', type=str2bool, default=False, help='plot initial density map after construction') 
     parser.add_argument('--write_placement', type=str2bool, default=True, help='write placement result') 
     parser.add_argument('--write_global_placement', type=str2bool, default=False, help='write global placement result') 
     parser.add_argument('--output_dir', type=str, default="output", help='output directory') 

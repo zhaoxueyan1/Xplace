@@ -1,6 +1,10 @@
 #pragma once
 #include "common/common.h"
+#include "gpugr/db/GRSetting.h"
+#include "gpugr/gr/CPURouter.h"
+#if ENABLE_CUDA
 #include "gpugr/gr/GPURouter.h"
+#endif
 
 namespace gr {
 class GRDatabase;
@@ -16,6 +20,9 @@ public:
 public:
     std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> getDemandMap();
     torch::Tensor getCapacityMap();
+    torch::Tensor getRawWireDemandMap();
+    torch::Tensor getFixUsageMap();
+    torch::Tensor getMovUsageMap();
     torch::Tensor calcRouteGrad(torch::Tensor mask_map,
                                 torch::Tensor wire_dmd_map_2d,
                                 torch::Tensor via_dmd_map_2d,
@@ -61,10 +68,22 @@ public:
     std::tuple<int, int> getGcellStep();
     std::vector<int> getLayerPitch();
     std::vector<int> getLayerWidth();
+    std::tuple<int, int> getRoutingLayerRange() const;
+    std::vector<std::string> getRoutingLayerNames() const;
+    std::vector<std::vector<int>> getRawRoutes();
+    CpuRouteRunStats getRunStats() const;
+    gr::GRDatabase& getGRDatabase();
 
 private:
+    [[noreturn]] void unsupported(const std::string& operation);
+    GGRBackend resolveBackend();
+
     gr::GRDatabase& grdb;
+#if ENABLE_CUDA
     gr::GPURouter router;
+#endif
+    gr::CPURouter cpuRouter;
+    GGRBackend backend = GGRBackend::AUTO;
 };
 
 }  // namespace gr

@@ -2,6 +2,9 @@
 #include "MazeRoute.h"
 #include "PatternRoute.h"
 #include "common/common.h"
+#include "gpugr/gr/BatchOccupancy.h"
+#include "gpugr/gr/RouteBufferCapacity.h"
+#include <cstdint>
 #include <torch/extension.h>
 #include "gpugr/db/GrNet.h"
 
@@ -13,19 +16,50 @@ class GPURouter {
 public:
     GPURouter(){};
     GPURouter(
-        int device_id, int layer, int x, int y, int N_, int cgxsize_, int cgysize_, int direction, int csrn_scale) {
-        initialize(device_id, layer, x, y, N_, cgxsize_, cgysize_, direction, csrn_scale);
+        int device_id,
+        int layer,
+        int x,
+        int y,
+        int N_,
+        int cgxsize_,
+        int cgysize_,
+        int direction,
+        int csrn_scale,
+        int routing_layer_begin = 0,
+        int routing_layer_end = -1) {
+        initialize(device_id,
+                   layer,
+                   x,
+                   y,
+                   N_,
+                   cgxsize_,
+                   cgysize_,
+                   direction,
+                   csrn_scale,
+                   routing_layer_begin,
+                   routing_layer_end);
     }
     ~GPURouter();
 
     void initialize(
-        int device_id, int layer, int x, int y, int N_, int cgxsize_, int cgysize_, int direction, int csrn_scale);
+        int device_id,
+        int layer,
+        int x,
+        int y,
+        int N_,
+        int cgxsize_,
+        int cgysize_,
+        int direction,
+        int csrn_scale,
+        int routing_layer_begin = 0,
+        int routing_layer_end = -1);
 
     void setMap(const std::vector<float> &cap,
                 const std::vector<float> &wir,
                 const std::vector<float> &fixedL,
                 const std::vector<float> &fix);
     void setFromNets(std::vector<GrNet> &nets, int numPlPin_);
+    void growRouteBuffer(const std::vector<int>& netIds);
     void setToNets(std::vector<GrNet> &nets);
     void route(std::vector<GrNet> &nets, int iterleft);
     void setUnitViaMultiplier(float w);
@@ -37,6 +71,7 @@ public:
 public:
     std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> getDemandMap();
     torch::Tensor getCapacityMap();
+    torch::Tensor getRawWireDemandMap();
     torch::Tensor calcRouteGrad(torch::Tensor mask_map,
                                 torch::Tensor wire_dmd_map_2d,
                                 torch::Tensor via_dmd_map_2d,
@@ -78,6 +113,7 @@ public:
                                          torch::Tensor pin_id2node_id,
                                          int num_movable_nodes);
     int getNumOvflNets() { return numOvflNets; }
+    std::vector<std::vector<int>> getRawRoutes();
 
 private:
     GPUMazeRouter gpuMR;
@@ -86,16 +122,25 @@ private:
 
     int DEVICE_ID;
     int LAYER, N, X, Y, NET_NUM, DIRECTION;
+    int routingLayerBegin = 0, routingLayerEnd = -1;
     int COARSENING_SCALE;
     int cgxsize, cgysize;
+    bool mazeInitialized = false;
 
     int *pinNum = nullptr, *pinNumOffset = nullptr, *pins = nullptr;
-    int *routes = nullptr, *routesOffset = nullptr, *routesOffsetCPU = nullptr, *pinNumCPU = nullptr;
+    int *routes = nullptr, *pinNumCPU = nullptr;
+    int64_t *routesOffset = nullptr, *routesOffsetCPU = nullptr, *batchRouteOffsets = nullptr;
+    int64_t *routeLengths = nullptr;
+    int64_t *batchRouteCapacities = nullptr, *batchRouteLengths = nullptr;
+    int *batchRouteOverflows = nullptr;
+    int *batchNetIds = nullptr;
     int *allpins;
     int *points = nullptr, *gbpoints = nullptr;
+    size_t pointsCapacity = 0, gbpointsCapacity = 0;
     int *gbpinRoutes = nullptr, *gbpin2netId = nullptr, *plPinId2gbPinId = nullptr;
     float *capacity, *wireDist, *fixedLength, *fixed;
     int *wires, *vias, *prev;
+    int64_t *prDist = nullptr;
     int *isOverflowWire, *isOverflowVia, *isOverflowNet = nullptr;
     int *boundaries, *isLocked;
     int *wiresCPU, *viasCPU;
@@ -112,6 +157,7 @@ private:
     const int MAX_BATCH_SIZE = 100, MAX_PIN_SIZE_PER_NET = 500000;
 
     std::vector<std::vector<short>> vis, visLL, visRR;
+    BatchOccupancy batchOccupancy;
 };
 
 }  // namespace gr
