@@ -10,11 +10,20 @@ from pathlib import Path
 
 
 XPLACE_ROOT = Path(__file__).resolve().parents[2]
-BUILD_ROOT = XPLACE_ROOT / "build_cpu_pr"
+BUILD_ROOT = Path(os.environ.get("XPLACE_TEST_BUILD_ROOT", XPLACE_ROOT / "build_cpu_pr"))
 
 
 class TestPortlessIOPinGRNet(unittest.TestCase):
     def test_portless_io_pin_net_is_not_routed(self):
+        self.check_grnet()
+
+    def test_undefined_bias_layer_does_not_corrupt_fixed_cell_obstacles(self):
+        self.check_grnet(bias_pin=True)
+
+    def test_undefined_signal_layer_rejects_the_library(self):
+        self.check_grnet(bias_pin=True, signal_pin=True)
+
+    def check_grnet(self, bias_pin=False, signal_pin=False):
         gpugr_candidates = sorted((BUILD_ROOT / "cpp_to_py" / "gpugr").glob("gpugr*.so"))
         io_parser_candidates = sorted((BUILD_ROOT / "cpp_to_py" / "io_parser").glob("io_parser*.so"))
         common_lib = BUILD_ROOT / "cpp_to_py" / "common" / "libxplace_common.so"
@@ -52,7 +61,19 @@ MACRO CORE_DUMMY
   SITE core ;
 END CORE_DUMMY
 END LIBRARY
-"""
+""".replace("END CORE_DUMMY", """  PIN VNW
+    DIRECTION INOUT ;
+    USE POWER ;
+    PORT
+      LAYER PVT3 ;
+      RECT 0 0 1 1 ;
+      POLYGON 0 0 1 0 1 1 0 1 ;
+      LAYER M1 ;
+      RECT 0 0 1 0.1 ;
+    END
+  END VNW
+END CORE_DUMMY""" if bias_pin else "END CORE_DUMMY")
+                .replace("USE POWER", "USE SIGNAL" if signal_pin else "USE POWER")
             )
             def_path.write_text(
                 """VERSION 5.8 ;
@@ -73,7 +94,8 @@ NETS 1 ;
 - N1 ( PIN PAD ) ;
 END NETS
 END DESIGN
-"""
+""".replace("COMPONENTS 0 ;", "COMPONENTS 1 ;\n- TAP CORE_DUMMY + FIXED ( 0 0 ) N ;"
+            if bias_pin else "COMPONENTS 0 ;")
             )
 
             script = f"""
@@ -140,6 +162,10 @@ print("portless_io_grnet_skipped")
             except subprocess.TimeoutExpired as exc:
                 self.fail(f"portless I/O pin GR setup timed out: {exc}")
 
+            if signal_pin:
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("RuntimeError: Failed to read LEF", result.stderr)
+                return
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertEqual(result.stdout.count("Skip GR pin without access points"), 1, result.stdout)
             self.assertIn("portless_io_grnet_skipped", result.stdout)

@@ -1,4 +1,5 @@
 #include "Database.h"
+#include <stdexcept>
 
 #include "BsRouteInfo.h"
 #include "Cell.h"
@@ -55,6 +56,11 @@ Database::~Database() {
 
 void Database::load() {
     // ----- design related options -----
+    auto read_required_lef = [this](const std::string& path) {
+        if (!readLEF(path)) {
+            throw std::runtime_error("Failed to read LEF: " + path);
+        }
+    };
 
     if (setting.BookshelfAux != "") {
         setting.Format = "bookshelf";
@@ -64,17 +70,17 @@ void Database::load() {
 
     if (setting.LefFile != "") {
         setting.Format = "lefdef";
-        readLEF(setting.LefFile);
+        read_required_lef(setting.LefFile);
         lef_read = true;
     } else if ((setting.LefCell != "") && (setting.LefTech != "")) {
         setting.Format = "lefdef";
-        readLEF(setting.LefTech);
-        readLEF(setting.LefCell);
+        read_required_lef(setting.LefTech);
+        read_required_lef(setting.LefCell);
         lef_read = true;
     } else if (setting.LefFiles.size() > 0) {
         setting.Format = "lefdef";
         for (auto lef : setting.LefFiles) {
-            readLEF(lef);
+            read_required_lef(lef);
         }
         lef_read = true;
     }
