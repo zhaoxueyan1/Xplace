@@ -216,7 +216,6 @@ bool Database::readLEF(const std::string& file) {
     int res = lefrRead(fp, file.c_str(), (void*)this);
     if (res) {
         logger.error("Error in reading LEF");
-        return false;
     }
     lefrReleaseNResetMemory();
     //  lefrUnsetCallbacks();
@@ -224,7 +223,7 @@ bool Database::readLEF(const std::string& file) {
     lefrUnsetNonDefaultCbk();
     lefrUnsetViaCbk();
     fclose(fp);
-    return true;
+    return res == 0;
 }
 
 bool Database::readDEF(const std::string& file) {
@@ -1131,9 +1130,20 @@ int readLefPin(lefrCallbackType_e c, lefiPin* pin, lefiUserData ud) {
                 break;
             case lefiGeomLayerE:
                 layer = db->getLayer(string(geom->getLayer(i)));
-                assert(layer);
+                if (!layer) {
+                    if (type != 'p' && type != 'g') {
+                        logger.error("undefined layer %s on signal pin %s.%s",
+                                     geom->getLayer(i), celltype->name.c_str(), name.c_str());
+                        return 1;
+                    }
+                    // Some PDKs omit well-bias implant layers from routing tech LEF.
+                    // Keep the PG pin, but never store a Shape with a null Layer reference.
+                    logger.warning("skip undefined PG layer %s on %s.%s",
+                                   geom->getLayer(i), celltype->name.c_str(), name.c_str());
+                }
                 break;
             case lefiGeomRectE:
+                if (!layer) break;
                 rect = geom->getRect(i);
                 pintype->addShape(*layer,
                                   lround(rect->xl * convertFactor),
@@ -1142,6 +1152,7 @@ int readLefPin(lefrCallbackType_e c, lefiPin* pin, lefiUserData ud) {
                                   lround(rect->yh * convertFactor));
                 break;
             case lefiGeomPolygonE:
+                if (!layer) break;
                 polygon = geom->getPolygon(i);
                 poly.clear();
                 bj = 0;
